@@ -37,7 +37,7 @@ async function assertFits() {
 }
 try {
   manage('migrate', '--noinput');
-  manage('shell', '-c', "from django.contrib.auth import get_user_model; get_user_model().objects.create_user('ui-fixture', password='local-ui-fixture-password')");
+  manage('shell', '-c', "from django.contrib.auth import get_user_model; get_user_model().objects.create_user('ui-fixture', password='local-ui-fixture-password', is_staff=True)");
   server = spawn(python, [join(root, 'backend/manage.py'), 'runserver', '127.0.0.1:8765', '--noreload'], {cwd: root, env, stdio: ['ignore', 'pipe', 'pipe']});
   server.stdout.on('data', data => { logs += data; });
   server.stderr.on('data', data => { logs += data; });
@@ -136,10 +136,24 @@ try {
   const report = await (await page.request.get(`${baseURL}/api/runs/${run.id}/readiness/`)).json();
   assert.equal(report.eligible, false);
   assert(report.checks.some(check => check.label === 'Operator enablement' && !check.passed));
+  await page.locator('[data-section="autonomyPanel"]').click();
+  assert.equal(await page.locator('#autoLeverage').inputValue(), '10');
+  await page.locator('#autoLeverage').fill('11');
+  assert.equal(await page.locator('#autoLeverage').evaluate(n => n.checkValidity()), false);
+  await page.locator('#autoLeverage').fill('10');
+  await page.locator('#autoEnable').click();
+  await page.locator('#autoStatus').filter({hasText: 'Enabled'}).waitFor();
+  const automatic = (await (await page.request.get(`${baseURL}/api/dashboard/`)).json()).autonomy;
+  assert.equal(automatic.config.max_leverage, 10);
+  assert.equal(automatic.enabled, true);
+  assert.equal(automatic.latest.status, 'queued');
+  await screenshot('autonomy-desktop');
+  await page.locator('#autoStop').click();
+  await page.locator('#autoStatus').filter({hasText: 'Stopped'}).waitFor();
   await page.setViewportSize({width: 390, height: 844});
   await assertFits();
   await screenshot('readiness-mobile');
-  for (const section of ['dataPanel', 'researchPanel', 'paperPanel']) {
+  for (const section of ['dataPanel', 'researchPanel', 'paperPanel', 'autonomyPanel']) {
     await page.locator(`[data-section="${section}"]`).click();
     await assertFits();
     await screenshot(`${section}-mobile`);

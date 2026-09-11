@@ -24,8 +24,9 @@ class DatabaseStartupTests(SimpleTestCase):
 
     @patch(f"{COMMAND}.time.sleep")
     @patch(f"{COMMAND}.connection")
-    def test_workers_wait_until_both_required_tables_exist(self, connection, sleep):
-        connection.introspection.table_names.side_effect = [[], ["trading_event"], ["trading_event", "trading_liveorder"]]
+    @patch(f"{COMMAND}.MigrationExecutor")
+    def test_workers_wait_until_latest_code_migrations_are_applied(self, executor, connection, sleep):
+        executor.return_value.migration_plan.side_effect = [["0007"], ["0008"], []]
         call_command("wait_for_database")
         self.assertEqual(sleep.call_count, 2)
 

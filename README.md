@@ -12,6 +12,8 @@ BTC, XRP, SOL and ETH have dedicated asset cards. Import up to 1,000,000 real on
 
 **Real-time paper operation:** new runs preload already-known, consecutive completed candles for their indicators and check incoming market context every second. Protective exits check every recorded book update. The operations dashboard refreshes prices, portfolio status and current signal reasons every second, shows processing delay, flags stale data, and reconnects automatically. Runs continue in the Render worker when the browser is closed. News is polled every two minutes and optional AI assessments every five minutes; the AI is not called on every tick.
 
+**Automatic AI research:** the **Automatic AI** tab controls daily self-training across all four assets. Four directional/horizon logistic models per asset compete with trend, RSI and breakout rules at every integer leverage from 1× to the configured hard maximum of **10×** (480 candidates by default). Validation chooses the winner after modeled costs; a separate historical period evaluates that fixed choice. It can choose cash. Four frozen challengers then run forward on live Bybit perpetual depth and mark prices with isolated-margin paper accounting. Historical spot data is explicitly a futures price proxy; funding is a declared adverse allowance, not actual settlement history. This service is paper-only and cannot place leveraged exchange orders. See the operating guide for assumptions and controls.
+
 The existing browser chart and optimizer still run independently without a backend. Crypto candles use a public API; forex and commodities require your own Twelve Data API key. The sections below describe that browser research workspace.
 
 ## Use

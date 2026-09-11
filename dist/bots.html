@@ -33,8 +33,31 @@
         <button data-section="researchPanel"><span>02</span> Test strategies</button>
         <button data-section="paperPanel"><span>03</span> Paper trading</button>
         <button data-section="livePanel"><span>04</span> Live readiness</button>
+        <button data-section="autonomyPanel"><span>05</span> Automatic AI</button>
       </nav>
       <div class="status-grid" id="sourceStatuses" aria-label="Data and worker health"></div>
+      <section id="autonomyPanel" class="operation-section" hidden>
+        <article class="panel"><div class="panel-top"><div><span class="eyebrow">BTC · XRP · SOL · ETH / USDT · PAPER ONLY</span><h2>Train, compare, observe.</h2></div><span class="mode-badge">Hard ceiling: 10×</span></div>
+          <p>Automatically retrain long and short models, compare them with trend, RSI and breakout strategies, and select the highest net return in the validation period. Every cycle freezes its choices before testing on future feeds.</p>
+          <p id="autoStatus" class="runtime-strip" role="status">Loading automatic research…</p>
+          <form id="autoForm"><div class="fields auto-fields">
+            <label>Maximum leverage<input id="autoLeverage" type="number" min="1" max="10" step="1" value="10" required></label>
+            <label>Retrain every, hours<input id="autoInterval" type="number" min="6" max="168" step="1" value="24" required></label>
+            <label>Fresh candles needed per asset<input id="autoFresh" type="number" min="60" max="10080" step="1" value="1440" required></label>
+          </div><details><summary>Paper capital, risk and cost assumptions</summary><div id="autoRiskFields" class="fields auto-fields"></div></details>
+          <div class="model-actions"><button id="autoEnable" class="primary" type="submit">Enable automatic research</button><button id="autoStop" type="button" class="danger">Stop & flatten paper positions</button></div></form>
+          <p id="autoControlNote" class="muted small"></p><p class="muted small">Up to 100,000 completed candles per asset; 12 strategies × each integer leverage × 4 assets (480 at 10×). Changes close the current paper cycle on fresh futures books. A loss limit can stop entries before the next cycle.</p>
+        </article>
+        <article class="panel"><span class="eyebrow">HISTORICAL SELECTION</span><h2 id="autoWinner">Waiting for the first search.</h2><p id="autoResult" class="muted"></p>
+          <div id="autoLeaderboard" class="table-scroll"></div><details><summary>Data, selection method and limitations</summary><div id="autoMethod" class="small muted"></div><a id="autoExport" class="button-link" hidden target="_blank" rel="noopener">Open full cycle report</a></details>
+        </article>
+        <article class="panel"><span class="eyebrow">FROZEN MODELS · FUTURE OBSERVATIONS</span><h2>Four independent paper challengers.</h2>
+          <p id="autoForward" class="runtime-strip">A completed search starts these portfolios automatically.</p><div id="autoPortfolios" class="comparison-grid"></div>
+          <p class="muted small">Each challenger has its own virtual balance. The designated capital stance selects one portfolio or cash; the four balances are not combined. Fills require a later recorded Bybit futures book. Exchange mark prices drive modeled isolated liquidation.</p>
+          <details><summary>Recent fills and decision inputs</summary><div id="autoRecords" class="decision-journal"></div></details>
+          <details><summary>Completed forward cycles</summary><div id="autoHistory" class="table-scroll"></div></details>
+        </article>
+      </section>
       <section id="dataPanel" class="operation-section">
         <div class="data-grid">
           <article class="panel book-panel"><div class="panel-top"><div><span class="eyebrow">BINANCE SPOT · TOP 20 LEVELS</span><h2 id="bookSymbol">BTC / USDT</h2></div><a id="exportEvents" class="button-link" href="/api/events/?symbol=BTCUSDT">Export events</a></div>

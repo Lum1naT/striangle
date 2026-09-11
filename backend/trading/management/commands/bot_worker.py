@@ -10,6 +10,7 @@ from trading.locking import single_worker
 from trading.models import Run
 from trading.recording import heartbeat
 from trading.services import process_run
+from trading.auto_paper import tick as autonomy_tick
 
 
 class Command(BaseCommand):
@@ -24,11 +25,15 @@ class Command(BaseCommand):
             signal.signal(sig, lambda *_: stop.set())
         with single_worker("trader", stop) as check:
             try:
-                last_heartbeat = 0
+                last_heartbeat, last_autonomy = 0, -1
                 while not stop.is_set():
                     check()
                     close_old_connections()
                     backlog = False
+                    if time.monotonic()-last_autonomy >= 1:
+                        backlog = autonomy_tick()
+                        if not backlog:
+                            last_autonomy = time.monotonic()
                     for run_id, mode in Run.objects.filter(mode__in=["paper", "live"], status__in=["running", "reconciling"]).values_list("id", "mode"):
                         backlog = process_run(run_id) or backlog
                         if mode == "live":

@@ -153,6 +153,16 @@ def chronological_research(data, configs, mode, selection_strategy):
 
 def perform_job(job, stop=None):
     params = job.params
+    if job.kind == "autotrain":
+        from .autonomy import run_cycle
+        from .models import AutoCycle
+        if AutoCycle.objects.filter(pk=params["cycle_id"], status="cancelled").exists():
+            return {"stage": "Cancelled after policy change"}
+        def progress(stage):
+            job.result = {"stage": stage, "cycle_id": params["cycle_id"]}
+            job.save(update_fields=["result"])
+            heartbeat("research", "running", stage)
+        return run_cycle(params["cycle_id"], progress, stop)
     symbol = params["symbol"]
     if job.kind == "train":
         from .ml_training import train_symbol
@@ -208,15 +218,35 @@ def work_one_job(stop=None):
         job.status, job.finished_at = "queued", None
         job.save(update_fields=["result", "status", "finished_at"])
         return True
+    except InterruptedError:
+        if job.kind != "autotrain":
+            raise
+        from .models import AutoCycle
+        AutoCycle.objects.filter(pk=job.params["cycle_id"]).update(status="queued")
+        job.status, job.finished_at = "queued", None
+        job.save(update_fields=["result", "status", "finished_at"])
+        return True
     except Exception as exc:
         job.refresh_from_db(fields=["result"])
         job.status = "failed"
         job.error = str(exc)[:500] if isinstance(exc, (ValueError, ProviderError)) else f"Research failed ({type(exc).__name__}); inspect worker logs."
+        if job.kind == "autotrain":
+            import logging
+            from datetime import timedelta
+            from .models import AutoCycle, AutonomyPolicy
+            logging.getLogger(__name__).exception("Autonomous research failed for cycle %s", job.params["cycle_id"])
+            AutoCycle.objects.filter(pk=job.params["cycle_id"]).update(status="failed", error=job.error, finished_at=timezone.now())
+            AutonomyPolicy.objects.filter(pk=1, enabled=True).update(status=job.error[:300], next_run_at=timezone.now()+timedelta(hours=1))
     job.finished_at = timezone.now()
     job.save(update_fields=["result", "status", "error", "finished_at"])
     return True
 
 
 def recover_jobs():
+    from .models import AutoCycle
+    # A cycle keeps its original data cutoff across restart; fitting is deterministic.
+    for job in Job.objects.filter(status="running", kind="autotrain"):
+        AutoCycle.objects.filter(pk=job.params["cycle_id"], status="training").update(status="queued")
+    Job.objects.filter(status="running", kind="autotrain").update(status="queued", error="", finished_at=None)
     Job.objects.filter(status="running", kind="history").update(status="queued", error="", finished_at=None)
     Job.objects.filter(status="running").exclude(kind="history").update(status="failed", error="Research worker restarted before completion; submit a new job", finished_at=timezone.now())

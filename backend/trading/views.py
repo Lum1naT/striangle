@@ -22,6 +22,8 @@ from .ml_training import model_summary
 from .markets import ASSETS, MAX_HISTORY_CANDLES, MAX_QUEUED_JOBS, MAX_RESEARCH_CANDLES
 from .research import candidate_configs
 from .services import create_paper, readiness
+from . import autonomy
+from .models import AutoCycle, AutonomyPolicy
 
 
 def body(request):
@@ -45,6 +47,8 @@ def api(view):
             return JsonResponse({"error": "Run not found"}, status=404)
         except Job.DoesNotExist:
             return JsonResponse({"error": "Research job not found"}, status=404)
+        except AutoCycle.DoesNotExist:
+            return JsonResponse({"error": "Automatic research cycle not found"}, status=404)
         except (ValueError, KeyError, TypeError, ValidationError) as exc:
             return JsonResponse({"error": str(exc)[:300] if isinstance(exc, ValueError) else "Invalid request fields"}, status=400)
     return wrapped
@@ -182,7 +186,8 @@ def dashboard(request):
     news = [{"id": e.id, "at": e.received_at, **e.payload} for e in Event.objects.filter(kind="news").order_by("-id")[:10]]
     return JsonResponse({"now": now, "sources": sources, "markets": markets, "news": news,
         "runs": [run_summary(r) for r in Run.objects.filter(owner=request.user).order_by("-created_at")[:50]],
-        "jobs": list(Job.objects.filter(Q(owner=request.user) | Q(owner__isnull=True, kind="train")).order_by("-created_at").values("id", "kind", "status", "error", "result", "params", "created_at")[:12]),
+        "jobs": list(Job.objects.filter(Q(owner=request.user) | Q(owner__isnull=True, kind__in=["train", "autotrain"])).order_by("-created_at").values("id", "kind", "status", "error", "result", "params", "created_at")[:12]),
+        "autonomy": autonomy.summary(), "can_control_autonomy": request.user.is_staff,
         "market_models": [model_summary(model) for symbol in settings.SYMBOLS
             if (model := MarketModel.objects.filter(symbol=symbol).order_by("-created_at").first())],
         "limits": {"history_candles": MAX_HISTORY_CANDLES, "research_candles": MAX_RESEARCH_CANDLES},
@@ -196,6 +201,7 @@ def dashboard(request):
 def realtime(request):
     now = timezone.now()
     data = {"now": now, "sources": source_statuses(now),
+        "autonomy_live": autonomy.summary(full=False),
         "markets": [{"symbol": symbol, "records": market_records(symbol)} for symbol in settings.SYMBOLS],
         "runs": [run_summary(r, now) for r in Run.objects.filter(owner=request.user).order_by("-created_at")[:50]],
         "news": [{"id": e.id, "at": e.received_at, **e.payload} for e in Event.objects.filter(kind="news").order_by("-id")[:10]],
@@ -204,6 +210,28 @@ def realtime(request):
         run = Run.objects.get(pk=request.GET["run_id"], owner=request.user)
         data["detail"] = run_detail_data(run)
     return JsonResponse(data)
+
+
+@require_POST
+@api
+def autonomy_control(request):
+    if not request.user.is_staff:
+        return JsonResponse({"error": "A workspace administrator controls the shared automatic research service"}, status=403)
+    data = body(request)
+    if set(data)-{"enabled", "config"} or "enabled" not in data:
+        raise ValueError("Supply enabled and optional config")
+    current = AutonomyPolicy.objects.filter(pk=1).first()
+    autonomy.configure(data.get("config", current.config if current else None), data["enabled"])
+    autonomy.schedule_cycle()
+    return JsonResponse(autonomy.summary())
+
+
+@require_GET
+@api
+def autonomy_report(request, cycle_id):
+    cycle = AutoCycle.objects.defer("artifacts", "state").get(pk=cycle_id)
+    return JsonResponse({"id": str(cycle.id), "status": cycle.status, "config": cycle.config,
+        "cutoff": cycle.cutoff, "report": cycle.report, "error": cycle.error})
 
 
 @require_POST

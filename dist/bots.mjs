@@ -1,3 +1,4 @@
+import {setupAutonomy} from './autonomy.mjs';
 const $ = id => document.getElementById(id);
 const labels = {trend: 'Trend baseline', rsi: 'RSI baseline', ai_trend: 'News-assisted trend', ml: 'Trained market model'};
 const assets = {BTCUSDT: 'Bitcoin', XRPUSDT: 'XRP', SOLUSDT: 'Solana', ETHUSDT: 'Ethereum'};
@@ -19,6 +20,7 @@ function element(tag, text, className) {
   return node;
 }
 function message(text, error = false) { $('globalStatus').textContent = text; $('globalStatus').classList.toggle('error', error); }
+const renderAutonomy = setupAutonomy({$, element, fmt, when, api, busy, message, refresh});
 function csrf() { return document.cookie.split('; ').find(x => x.startsWith('csrftoken='))?.split('=').slice(1).join('=') || ''; }
 async function api(path, payload) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), path.startsWith('realtime/') ? 5000 : 20000);
@@ -271,7 +273,7 @@ function renderJobs() {
     }
     row.append(element('span', job.error || when(job.created_at)));
     if (job.result?.run_id) row.append(actionButton('View result', () => inspect(job.result.run_id, true)));
-    if (job.kind === 'train') row.append(element('span', job.result?.stage || 'Waiting for the research worker'));
+    if (['train', 'autotrain'].includes(job.kind)) row.append(element('span', job.result?.stage || 'Waiting for the research worker'));
     return row;
   }));
 }
@@ -294,6 +296,7 @@ async function refresh(force = true) {
     snapshotSeenAt = started; connectionError = false; retryDelay = 1000;
     if (!initialized) { setConfig(snapshot.defaults); initialized = true; }
     renderSources(); renderMarket(); renderRunLists();
+    renderAutonomy(full ? snapshot.autonomy : {...snapshot.autonomy, ...incoming.autonomy_live}, snapshot.can_control_autonomy, full);
     if (full) { renderJobs(); updateDates(); }
     const activeLive = snapshot.runs.some(r => r.mode === 'live' && ['running', 'reconciling'].includes(r.status));
     $('executionBadge').textContent = activeLive ? snapshot.execution_environment : 'Paper trading';

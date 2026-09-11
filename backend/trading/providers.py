@@ -98,6 +98,35 @@ def candle_payload(row):
 def normalize_bybit(message, cache, received_at=None):
     now = time.time() if received_at is None else received_at
     topic = message.get("topic", "")
+    if topic.startswith("orderbook.50."):
+        data, symbol = message["data"], topic.split(".")[-1]
+        key = "book:"+symbol
+        if message.get("type") == "snapshot" or data.get("u") == 1:
+            cache[key] = {"b": {}, "a": {}, "seq": -1, "emitted": 0}
+        book = cache.get(key)
+        if book is None or data.get("seq", 0) < book["seq"]:
+            return []
+        for side in ("b", "a"):
+            for raw_price, raw_size in data.get(side, []):
+                price, size = dec(raw_price), dec(raw_size)
+                if price <= 0 or size < 0:
+                    raise ValueError("Invalid futures order-book level")
+                if size == 0:
+                    book[side].pop(price, None)
+                else:
+                    book[side][price] = size
+        book["seq"] = data.get("seq", 0)
+        if now-book["emitted"] < 1:
+            return []
+        body = normalize_book(list(book["b"].items()), list(book["a"].items()))
+        body.update(venue="Bybit USDT perpetual", update_id=data["u"], cross_sequence=book["seq"])
+        book["emitted"] = now
+        return [observation("bybit_linear", f"book:{data['u']}:{message['ts']}", symbol, "perp_book", body, message.get("cts", message["ts"])/1000, now)]
+    if topic.startswith("kline.1."):
+        symbol = topic.split(".")[-1]
+        return [observation("bybit_linear", f"candle:{bar['start']}", symbol, "perp_candle",
+            candle_payload([bar["start"], bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"], bar["end"]]),
+            (bar["end"]+1)/1000, now) for bar in message["data"] if bar.get("confirm") is True]
     if topic.startswith("allLiquidation."):
         rows = []
         for n, item in enumerate(message["data"]):
@@ -117,6 +146,12 @@ def normalize_bybit(message, cache, received_at=None):
         if "fundingRate" not in full or "openInterest" not in full:
             return []
         body = {"funding_rate": float(dec(full["fundingRate"])), "open_interest": float(dec(full["openInterest"])), "venue": "Bybit derivatives"}
+        if full.get("markPrice"):
+            body["mark_price"] = float(dec(full["markPrice"]))
+            if body["mark_price"] <= 0:
+                raise ValueError("Invalid derivative mark price")
+        if full.get("nextFundingTime"):
+            body["next_funding_at"] = int(full["nextFundingTime"])/1000
         return [observation("bybit_linear", message.get("cs", message["ts"]), symbol, "derivatives", body, message["ts"]/1000, now)]
     return []
 

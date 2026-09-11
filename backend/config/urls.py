@@ -12,6 +12,8 @@ urlpatterns = [
     path("api/logout/", views.logout_view),
     path("api/dashboard/", views.dashboard),
     path("api/realtime/", views.realtime),
+    path("api/autonomy/control/", views.autonomy_control),
+    path("api/autonomy/cycles/<uuid:cycle_id>/", views.autonomy_report),
     path("api/jobs/", views.jobs),
     path("api/jobs/<uuid:job_id>/resume/", views.resume_history),
     path("api/runs/", views.runs),

@@ -44,6 +44,54 @@ class MarketModel(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
 
 
+class FuturesCandle(models.Model):
+    symbol = models.CharField(max_length=20)
+    opened_at = models.DateTimeField()
+    closed_at = models.DateTimeField()
+    fetched_at = models.DateTimeField(default=timezone.now)
+    payload = models.JSONField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["symbol", "opened_at"], name="futures_candle_unique")]
+
+
+class AutonomyPolicy(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    enabled = models.BooleanField(default=False)
+    config = models.JSONField(default=dict)
+    next_run_at = models.DateTimeField(default=timezone.now)
+    last_cutoff = models.DateTimeField(null=True)
+    status = models.CharField(max_length=300, default="Disabled")
+
+
+class AutoCycle(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    status = models.CharField(max_length=20, default="queued", db_index=True)
+    config = models.JSONField()
+    cutoff = models.DateTimeField()
+    created_at = models.DateTimeField(default=timezone.now)
+    forward_start = models.DateTimeField(null=True)
+    forward_end = models.DateTimeField(null=True)
+    finished_at = models.DateTimeField(null=True)
+    artifacts = models.JSONField(default=dict)
+    report = models.JSONField(default=dict)
+    state = models.JSONField(default=dict)
+    last_event_id = models.BigIntegerField(default=0)
+    error = models.CharField(max_length=500, blank=True)
+
+
+class AutoRecord(models.Model):
+    cycle = models.ForeignKey(AutoCycle, on_delete=models.CASCADE, related_name="records")
+    symbol = models.CharField(max_length=20)
+    kind = models.CharField(max_length=15)
+    event_id = models.BigIntegerField()
+    at = models.DateTimeField()
+    payload = models.JSONField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["cycle", "symbol", "kind", "event_id"], name="auto_record_once")]
+
+
 class Run(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)

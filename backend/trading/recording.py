@@ -13,7 +13,7 @@ from websockets.asyncio.client import connect
 
 from .ai import assess_news
 from .configuration import dec
-from .models import Candle, Event, Heartbeat
+from .models import Candle, Event, FuturesCandle, Heartbeat
 from .providers import fetch_heatmap, fetch_news, normalize_binance, normalize_bybit, observation
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,10 @@ def store_batch(batch):
     with transaction.atomic():
         Event.objects.bulk_create(rows, ignore_conflicts=True, batch_size=500)
         for row in batch:
+            if row["kind"] == "perp_candle":
+                body = row["payload"]
+                FuturesCandle.objects.get_or_create(symbol=row["symbol"], opened_at=stamp(body["opened_at"]),
+                    defaults={"closed_at": stamp(body["closed_at"]), "payload": body, "fetched_at": stamp(row["received_at"])})
             if row["kind"] == "candle":
                 body = row["payload"]
                 Candle.objects.get_or_create(symbol=row["symbol"], interval="1m", opened_at=stamp(body["opened_at"]),
@@ -113,6 +117,9 @@ async def stream_loop(name, url, queue, stop, *, subscribe=None):
             if name == "binance":
                 for symbol in settings.SYMBOLS:
                     await queue.put(observation("recorder", f"gap:{time.time_ns()}", symbol, "gap", {"reason": type(exc).__name__}))
+            else:
+                for symbol in settings.SYMBOLS:
+                    await queue.put(observation("recorder", f"perp-gap:{time.time_ns()}", symbol, "perp_gap", {"reason": type(exc).__name__}))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
             except TimeoutError:
@@ -195,7 +202,7 @@ async def record_forever(stop):
     producers = [
         asyncio.create_task(stream_loop("binance", "wss://data-stream.binance.vision/stream?streams="+streams, queue, stop)),
         asyncio.create_task(stream_loop("bybit", "wss://stream.bybit.com/v5/public/linear", queue, stop,
-            subscribe={"op": "subscribe", "args": [f"{topic}.{symbol}" for symbol in settings.SYMBOLS for topic in ("allLiquidation", "tickers")]})),
+            subscribe={"op": "subscribe", "args": [f"{topic}.{symbol}" for symbol in settings.SYMBOLS for topic in ("allLiquidation", "tickers", "orderbook.50", "kline.1")]})),
         asyncio.create_task(context_loop(queue, stop)),
     ]
     stop_task = asyncio.create_task(stop.wait())
