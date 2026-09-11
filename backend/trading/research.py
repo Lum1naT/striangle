@@ -12,6 +12,7 @@ from .models import Candle, Event, Job, Run
 from .history import HistoryPaused, import_history
 from .markets import MAX_RESEARCH_CANDLES
 from .providers import ProviderError
+from .ml import feature_vector, predict_vector
 from .recording import heartbeat, stamp
 
 
@@ -36,9 +37,14 @@ def replay(events, config, strategies=("trend", "rsi", "ai_trend")):
             "end_positions": "Open positions are marked at the final recorded bid with estimated exit costs, not invented closing fills."}
 
 
-def bar_test(bars, config):
-    state = initial_state(config, ("trend", "rsi"))
+def bar_test(bars, config, model=None, warmup=()):
+    state = initial_state(config, ("trend", "rsi", "ml") if model else ("trend", "rsi"))
     closes, previous, fills = [], None, []
+    for bar in warmup:
+        if previous is not None and bar["opened_at"]-previous != 60:
+            closes = []
+        closes = (closes+[float(bar["close"])])[-201:]
+        previous = bar["opened_at"]
     half_spread = dec(config["spread_bps"])/20000
 
     def book(price):
@@ -84,8 +90,12 @@ def bar_test(bars, config):
             mark(wallet, book(bar["close"])["bids"][0][0], bar["closed_at"], config)
         closes = (closes+[float(bar["close"])])[-201:]
         f = features({"closes": closes}, bar["closed_at"], config)
+        if model:
+            f["ml"] = predict_vector(model, feature_vector(closes)) or {}
         for name, wallet in state["wallets"].items():
             action, _ = signal(name, f, dec(wallet["qty"]) > 0, config)
+            if name == "ml" and dec(wallet["qty"]) > 0 and bar["closed_at"]-wallet["entry_at"] >= model["horizon_minutes"]*60:
+                action = "sell"
             if wallet["halted"] and dec(wallet["qty"]) > 0:
                 action = "sell"
             if action != "hold":
@@ -144,6 +154,16 @@ def chronological_research(data, configs, mode, selection_strategy):
 def perform_job(job, stop=None):
     params = job.params
     symbol = params["symbol"]
+    if job.kind == "train":
+        from .ml_training import train_symbol
+        def progress(stage):
+            job.result = {"symbol": symbol, "stage": stage}
+            job.save(update_fields=["result"])
+            heartbeat("research", "running", f"Training {symbol}: {stage}")
+        model = train_symbol(symbol, params.get("count", 100000), config=params.get("config"),
+            cutoff=stamp(params["cutoff"]), progress=progress)
+        return {"symbol": symbol, "model_id": str(model.id), "version": model.version,
+                "stage": "Model saved; start a new paper run to use it"}
     if job.kind == "history":
         def checkpoint(progress):
             job.result = progress

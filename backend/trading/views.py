@@ -9,6 +9,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
+from django.db.models import Q
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
@@ -16,7 +17,8 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .configuration import DEFAULTS, fingerprint, validate_config
 from .engine import MAX_CANDLE_AGE_SECONDS, metrics
-from .models import Candle, Event, Heartbeat, Job, LoginThrottle, Run
+from .models import Candle, Event, Heartbeat, Job, LoginThrottle, MarketModel, Run
+from .ml_training import model_summary
 from .markets import ASSETS, MAX_HISTORY_CANDLES, MAX_QUEUED_JOBS, MAX_RESEARCH_CANDLES
 from .research import candidate_configs
 from .services import create_paper, readiness
@@ -180,7 +182,9 @@ def dashboard(request):
     news = [{"id": e.id, "at": e.received_at, **e.payload} for e in Event.objects.filter(kind="news").order_by("-id")[:10]]
     return JsonResponse({"now": now, "sources": sources, "markets": markets, "news": news,
         "runs": [run_summary(r) for r in Run.objects.filter(owner=request.user).order_by("-created_at")[:50]],
-        "jobs": list(Job.objects.filter(owner=request.user).order_by("-created_at").values("id", "kind", "status", "error", "result", "params", "created_at")[:12]),
+        "jobs": list(Job.objects.filter(Q(owner=request.user) | Q(owner__isnull=True, kind="train")).order_by("-created_at").values("id", "kind", "status", "error", "result", "params", "created_at")[:12]),
+        "market_models": [model_summary(model) for symbol in settings.SYMBOLS
+            if (model := MarketModel.objects.filter(symbol=symbol).order_by("-created_at").first())],
         "limits": {"history_candles": MAX_HISTORY_CANDLES, "research_candles": MAX_RESEARCH_CANDLES},
         "defaults": DEFAULTS, "ai_configured": bool(settings.OPENAI_API_KEY and settings.OPENAI_MODEL),
         "model": settings.OPENAI_MODEL or None, "live_server_enabled": settings.LIVE_TRADING_ENABLED,
@@ -228,6 +232,15 @@ def jobs(request):
     symbol = symbol_value(data.get("symbol"))
     if Job.objects.filter(owner=request.user, status__in=["queued", "running"]).count() >= MAX_QUEUED_JOBS:
         raise ValueError("Wait for your current research jobs to finish")
+    if kind == "train":
+        count = data.get("count", 100000)
+        if type(count) is not int or not 5000 <= count <= 100000:
+            raise ValueError("Training requires 5,000–100,000 candles per asset")
+        if Job.objects.filter(kind="train", status__in=["queued", "running"], params__symbol=symbol).exists():
+            raise ValueError("Training is already queued or running for this asset")
+        params = {"symbol": symbol, "count": count, "cutoff": timezone.now().timestamp(), "config": validate_config(data.get("config"))}
+        job = Job.objects.create(owner=request.user, kind=kind, params=params)
+        return JsonResponse({"id": str(job.id), "status": job.status}, status=202)
     if kind == "backtest":
         mode = data.get("mode")
         if mode not in ("candles", "replay"):
@@ -286,6 +299,7 @@ def run_detail_data(run):
     return {**run_summary(run), "results": run.results, "curve": run.state.get("curve", []),
         "wallets": run.state.get("wallets", {}), "last_event_id": run.last_event_id,
         "latest_signals": run.state.get("latest_signals", {}),
+        "market_model": {"id": str(run.market_model_id), "version": run.state.get("market", {}).get("ml_model", {}).get("version")} if run.market_model_id else None,
         "decisions": list(run.decisions.order_by("-id").values("strategy", "at", "action", "reason", "features", "event_id")[:100]),
         "fills": list(run.fills.order_by("-id").values("strategy", "at", "side", "quantity", "price", "fee", "pnl", "reason", "details")[:100]),
         "orders": list(run.orders.order_by("-created_at").values("client_id", "kind", "status", "error", "created_at")[:30])}

@@ -77,7 +77,7 @@ New configurations use `decision_interval_seconds=1` (bounded to 1–60). Incomi
 
 The authenticated `/api/realtime/` endpoint omits historical counts and coverage queries. The dashboard requests it approximately every second, with full metadata every 30 seconds; requests never overlap, failures back off, returning online refreshes immediately, and hidden tabs stop polling. Quote freshness continues to age even when requests fail. Inspectors show current signal reasons, indicator readiness, last evaluation and measured receipt-to-processing delay. Controls keep their focus and expanded journal entries survive refreshes. Runs execute on the server independently of the browser. These are software scheduling targets, not a guaranteed exchange-to-execution latency or an HFT service.
 
-RSS is polled every 120 seconds and optional AI news assessments every 300 seconds; the latest valid assessment is reused. Increasing market decision frequency does not increase model-call frequency. Prior configurations without `decision_interval_seconds` keep their candle-close cadence. Engine version 1.1.0 changes the validation fingerprint, so older research evidence cannot automatically promote the new behavior into live trading.
+RSS is polled every 120 seconds and optional AI news assessments every 300 seconds; the latest valid assessment is reused. Increasing market decision frequency does not increase model-call frequency. Prior configurations without `decision_interval_seconds` keep their candle-close cadence. Engine version 1.2.0 changes the validation fingerprint, so older research evidence cannot automatically promote the new behavior into live trading.
 
 Three independent virtual portfolios receive identical subsequent data and costs:
 
@@ -85,7 +85,29 @@ Three independent virtual portfolios receive identical subsequent data and costs
 - **RSI:** enter at/below the lower threshold; exit at/above the upper threshold. RSI uses the simple trailing gains/losses ratio, not Wilder smoothing.
 - **AI-assisted trend:** the trend must be positive, with fresh supportive news, acceptable funding, book imbalance and executed flow. Large recent short liquidations defer squeeze chasing. Estimated heatmap filtering is opt-in through `require_heatmap`.
 
-AI is currently a **news interpretation layer feeding explicit entry rules**. There is no trained numerical price prediction model, autonomous code rewriting, arbitrary strategy code execution, reinforcement learner or profitability guarantee.
+An optional fourth portfolio uses a **trained numerical market model** when a saved model exists for the selected asset. The news interpretation layer remains separate. Neither can rewrite code, change risk limits or establish profitability by itself.
+
+### Trained market models
+
+In **Test strategies**, use **Train selected asset** or **Train all four models**. The research worker loads up to 100,000 already-fetched, completed one-minute candles per asset using a fixed request cutoff. At least 5,000 candles are required. Operators can queue the same work without creating an account:
+
+```sh
+python backend/manage.py train_models --enqueue --count 100000
+```
+
+This queues public-market jobs on the research worker; training does not consume the web service's memory or block the trader. Training is serialized, CPU thread pools are limited to one, and only the research process imports scientific libraries. Without `--enqueue`, the command trains directly. `--symbol BTCUSDT` limits it to one asset.
+
+The first model is L2-regularized logistic regression, trained separately for BTC, XRP, SOL and ETH. Its ten inputs use 61 consecutive closed prices: five trailing returns, two volatility windows, two SMA distances and centered RSI. The binary target is a next-open long move over 15 minutes that exceeds fees, spread and adverse slippage on both sides. This is a target estimate, not a calibrated guarantee of a profitable trade; protective exits and live execution can produce a different outcome.
+
+The chronological split is 60% fit, 20% validation and 20% final test. Samples whose future label reaches the next partition are removed. Standardization and weights are fitted only on training. Three regularization values (C=0.01, 0.1, 1) compete on validation log loss. The selected model is tested once, without refitting, at a prespecified 55% entry threshold. Missing-minute feature/label windows are excluded. Test classification reports AUC, log loss and Brier score against a constant training-rate baseline. The candle simulation compares model, trend and RSI after identical costs and risk settings, with a fresh portfolio and historical warmup context only. Samples overlap in time and are not independent trials.
+
+Every model saves JSON coefficients, scaling values, software/feature versions, cutoff and source-data SHA-256, split boundaries, cost assumptions and results in PostgreSQL. Imported candles are assumed observable at their historical close for the offline benchmark; their actual import receipt times remain in provenance. Historical books, news, funding and liquidation information are never invented from those candles. Repeated inspection/retraining on the same test period contaminates it; future paper results are the next unseen evidence.
+
+Unlinked new paper experiments automatically attach the latest supported model for that asset as a fourth wallet. The artifact and configuration fingerprint are frozen; retraining cannot replace an active run's weights. Linked historical replays retain their original strategy set. Inference uses a small standard-library dot product, cached per completed candle, while live gates check incoming events every second. A model entry requires fresh depth, flow and funding; adverse depth/flow, crowded funding, large short liquidations and any available negative news assessment can veto it. An API key is unnecessary for the price model. The separate news-assisted strategy still requires a configured news model.
+
+Positions exit at the 15-minute horizon or through the shared protective controls. Fills still need a later observed book. Missing/stale candles, seven-day-old model history or mismatched cost settings block new model entries. Choose **Use evaluated settings** to copy a model's original settings before starting a run. Trained model comparisons are explicitly **paper-only** and fail the exchange activation gate, regardless of historical results.
+
+Implementation references: [scikit-learn logistic regression](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html), [chronological splitting and gaps](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html).
 
 Changed proposals, protective exits and every closed-bar evaluation store the action, human-readable reason, inputs and event ID. Identical holds are journaled at most once a minute while the current signal view continues updating. Risk sizing limits the allocation by both available cash and estimated stop loss plus costs. Daily loss and peak drawdown limits prevent new entries and request exits. **Pause entries** preserves risk exits, which are checked on every book update independently of signal throttling. **Flatten & stop** exits on a later available book and stops only when flat; this is a request, not an instantaneous guaranteed fill. The entry gate rejects books older than the configured receipt-age limit (five seconds by default) and indicators whose last candle closed over 90 seconds ago. Database persistence delays do not make an old book fresh. The database atomically checkpoints wallets, decisions and fills so restart replay cannot double-charge them.
 

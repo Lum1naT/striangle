@@ -4,14 +4,20 @@ from django.utils import timezone
 
 from .configuration import dec, fingerprint, validate_config
 from .engine import initial_state, metrics, step
-from .models import Candle, Decision, Event, Fill, Run
+from .models import Candle, Decision, Event, Fill, MarketModel, Run
+from .ml import MODEL_VERSION
 from .recording import stamp
 from .research import as_event
 
 
 def create_paper(owner, symbol, raw_config, validation=None):
     config = validate_config(raw_config)
-    digest = fingerprint(config, settings.OPENAI_MODEL)
+    model = MarketModel.objects.filter(symbol=symbol, artifact__algorithm=MODEL_VERSION).order_by("-created_at").first()
+    # A linked event replay remains its original three-strategy experiment;
+    # the new market model needs its own future paper comparison.
+    if validation:
+        model = None
+    digest = fingerprint(config, settings.OPENAI_MODEL, model.version if model else "")
     if validation and (validation.owner_id != owner.id or validation.symbol != symbol or validation.config_hash != digest or validation.status != "completed"):
         raise ValueError("Validation must be your completed research run with identical symbol, model and settings")
     if Run.objects.filter(owner=owner, mode="paper", status="running").count() >= 10:
@@ -19,6 +25,9 @@ def create_paper(owner, symbol, raw_config, validation=None):
     started = timezone.now()
     last = Event.objects.filter(available_at__lte=started, received_at__lte=started).order_by("-id").first()
     state = initial_state(config)
+    if model:
+        state["market"]["ml_model"] = model.artifact
+        state["wallets"]["ml"] = initial_state(config, ("ml",))["wallets"]["ml"]
     # Indicator context is known at start; portfolios still have no historical
     # trades, decisions, returns or forward-evidence credit.
     recent = list(Candle.objects.filter(symbol=symbol, interval="1m", fetched_at__lte=started,
@@ -40,7 +49,7 @@ def create_paper(owner, symbol, raw_config, validation=None):
                 state["market"][kind] = context.payload | {"at": context.received_at.timestamp(), "id": context.id}
     state["last_id"] = last.id if last else 0
     return Run.objects.create(owner=owner, name=f"{symbol} forward comparison", symbol=symbol, mode="paper",
-        config=config, config_hash=digest, state=state, results=metrics(state, config), validation=validation,
+        config=config, config_hash=digest, state=state, results=metrics(state, config), validation=validation, market_model=model,
         started_at=started, last_event_id=state["last_id"])
 
 
@@ -112,8 +121,11 @@ def readiness(paper, include_environment=True):
     check("Prior unseen validation", validation and validation.mode == "replay" and validation.ended_at <= paper.started_at
           and validation.config_hash == paper.config_hash and held.get("return_pct", -1) > 0 and held.get("closed_trades", 0) >= 5,
           "A prior, matching event replay with positive AI holdout and at least five closed holdout trades is required")
-    check("Frozen configuration", paper.config_hash == fingerprint(paper.config, settings.OPENAI_MODEL),
+    check("Frozen configuration", paper.config_hash == fingerprint(paper.config, settings.OPENAI_MODEL,
+          paper.state.get("market", {}).get("ml_model", {}).get("version", "")),
           "Model, prompt, engine and risk parameters must match the evaluated version")
+    check("Market-model execution scope", not paper.market_model_id,
+          "Trained market-model comparisons are paper-only; they cannot arm exchange orders")
     if include_environment:
         check("Operator enablement", settings.LIVE_TRADING_ENABLED, "LIVE_TRADING_ENABLED is an explicit server-side switch")
         check("Dedicated account", settings.LIVE_ACCOUNT_DEDICATED and str(paper.owner_id) == settings.LIVE_OWNER_ID,

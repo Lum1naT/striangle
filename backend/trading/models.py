@@ -33,6 +33,17 @@ class Candle(models.Model):
         constraints = [models.UniqueConstraint(fields=["symbol", "interval", "opened_at"], name="candle_unique")]
 
 
+class MarketModel(models.Model):
+    """Immutable, shared public-market model; never contains account data."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    symbol = models.CharField(max_length=20, db_index=True)
+    version = models.CharField(max_length=64, unique=True)
+    artifact = models.JSONField()
+    report = models.JSONField()
+    data_end = models.DateTimeField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+
 class Run(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -51,6 +62,7 @@ class Run(models.Model):
     started_at = models.DateTimeField(default=timezone.now)
     ended_at = models.DateTimeField(null=True)
     validation = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT)
+    market_model = models.ForeignKey(MarketModel, null=True, blank=True, on_delete=models.PROTECT)
     error = models.TextField(blank=True)
 
 
@@ -82,7 +94,7 @@ class Fill(models.Model):
 
 class Job(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE)
     kind = models.CharField(max_length=20)
     params = models.JSONField(default=dict)
     status = models.CharField(max_length=20, default="queued")

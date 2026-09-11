@@ -98,6 +98,16 @@ try {
   assert.equal(datasetJobs.length,4);
   assert.deepEqual(new Set(datasetJobs.map(job=>job.params.symbol)),new Set(['BTCUSDT','XRPUSDT','SOLUSDT','ETHUSDT']));
   assert(datasetJobs.every(job=>job.params.count===100000&&job.status==='queued'));
+  // Real fitted coefficients on explicitly synthetic fixtures validate the UI,
+  // not market performance. Production training uses recorded exchange candles.
+  manage('shell', '-c', "from trading.tests.test_ml import bars; from trading.ml_training import fit_model; from trading.configuration import validate_config; from trading.models import MarketModel; from trading.recording import stamp; data=bars(); a,r=fit_model(data,validate_config()); a['version']='e2e-fixture'; MarketModel.objects.create(symbol='BTCUSDT',version=a['version'],artifact=a,report=r,data_end=stamp(data[-1]['closed_at']))");
+  await page.getByRole('button',{name:'Train all four models',exact:true}).click();
+  await page.locator('#marketModelMetrics tbody tr').nth(2).waitFor();
+  assert.match(await page.locator('#marketModelTitle').textContent(), /Bitcoin.*trained price model/);
+  assert.match(await page.locator('#marketModelMetrics').textContent(), /Trained market model/);
+  const trainingJobs=(await (await page.request.get(`${baseURL}/api/dashboard/`)).json()).jobs.filter(j=>j.kind==='train');
+  assert.equal(trainingJobs.length,4);
+  await screenshot('trained-model-desktop');
   await page.locator('[data-section="paperPanel"]').click();
   const created = page.waitForResponse(response => response.url() === `${baseURL}/api/runs/` && response.request().method() === 'POST');
   await page.locator('#startPaper').click();
@@ -105,7 +115,7 @@ try {
   assert.equal(response.status(), 201, await response.text());
   const run = await response.json();
   await page.locator('#runInspector').waitFor({state: 'visible'});
-  assert.equal(await page.locator('#comparisonMetrics .comparison-card').count(), 3);
+  assert.equal(await page.locator('#comparisonMetrics .comparison-card').count(), 4);
   assert.match(await page.locator('#decisionJournal').textContent(), /Waiting for live market data/);
   assert.match(await page.locator('#runActivity').textContent(), /signal checks every 1 s/);
   await page.getByRole('button', {name: 'Pause entries', exact: true}).click();

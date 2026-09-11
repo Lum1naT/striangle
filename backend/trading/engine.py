@@ -7,6 +7,7 @@ from decimal import Decimal
 from statistics import mean
 
 from .configuration import STRATEGIES, dec
+from .ml import model_signal, prediction
 
 ZERO = Decimal(0)
 MAX_CANDLE_AGE_SECONDS = 90
@@ -71,10 +72,14 @@ def features(market, at, config):
     for field in ("imbalance", "flow_imbalance", "funding_rate", "news_score"):
         if result[field] is None:
             result["missing"].append(field)
+    if market.get("ml_model"):
+        result["ml"] = prediction(market, at, config)
     return result
 
 
 def signal(strategy, f, holding, config):
+    if strategy == "ml":
+        return model_signal(f, holding)
     if f["slow_sma"] is None:
         return "hold", f"Warming up: need {config['slow']} completed, consecutive 1-minute candles."
     rising = f["fast_sma"] > f["slow_sma"]
@@ -170,7 +175,7 @@ def simulate_fill(wallet, side, book, config, at, reason):
     fee, pnl = gross*fee_rate, None
     wallet["fees"] = str(dec(wallet["fees"])+fee)
     if side == "buy":
-        wallet.update(cash=str(dec(wallet["cash"])-gross-fee), qty=str(quantity),
+        wallet.update(cash=str(dec(wallet["cash"])-gross-fee), qty=str(quantity), entry_at=at,
                       cost_basis=str(gross+fee), entry=str(gross/quantity), round_pnl="0")
     else:
         old_qty = dec(wallet["qty"])
@@ -191,7 +196,21 @@ def simulate_fill(wallet, side, book, config, at, reason):
 
 
 def proposal(name, wallet, market, f, now, config, paused=False, flatten=False):
+    if name == "ml" and dec(wallet["qty"]) > 0 and now-wallet.get("entry_at", now) >= 900:
+        return "sell", "The model's 15-minute holding horizon has elapsed."
     action, reason = signal(name, f, dec(wallet["qty"]) > 0, config)
+    if name == "ml" and action == "buy":
+        required = [key for key in ("imbalance", "flow_imbalance", "funding_rate") if f[key] is None]
+        if required:
+            return "hold", "Model entry waiting for fresh live context: " + ", ".join(required) + "."
+        if f["imbalance"] < config["min_imbalance"] or f["flow_imbalance"] < -0.1:
+            return "hold", "Model entry deferred: order-book depth or executed flow is adverse."
+        if f["funding_rate"] > config["max_funding_rate"] or f["liquidated_shorts_usd"] > max(1000000, f["liquidated_longs_usd"]*3):
+            return "hold", "Model entry deferred: crowded funding or a liquidation squeeze."
+        if f["news_score"] is not None and f["news_score"] < -config["ai_min_score"]:
+            return "hold", "Model entry vetoed by the fresh adverse news assessment."
+        if config["require_heatmap"] and f["heatmap"] is None:
+            return "hold", "Estimated liquidation heatmap is required but unavailable."
     max_age = MAX_CANDLE_AGE_SECONDS if config.get("decision_interval_seconds") else config["max_signal_age_seconds"]
     candle_age = now-market.get("last_closed_at", -1e20)
     if action == "buy" and (paused or flatten or wallet["halted"] or not 0 <= candle_age <= max_age):
@@ -258,6 +277,7 @@ def step(state, event, config, *, paused=False, flatten=False, execution_now=Non
     elif kind == "gap":
         market.pop("book", None)
         market["closes"] = []
+        market.pop("ml_prediction", None)
         market["tape"] = {}
         market.pop("last_closed_at", None)
         for wallet in state["wallets"].values():
@@ -319,6 +339,7 @@ def step(state, event, config, *, paused=False, flatten=False, execution_now=Non
             return [], []
         if previous is not None and opened-previous != 60:
             market["closes"] = []
+            market.pop("ml_prediction", None)
         market["last_opened"] = opened
         market["last_closed_at"] = float(body["closed_at"])
         market["closes"] = (market["closes"]+[float(body["close"])])[-201:]

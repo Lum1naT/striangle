@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const labels = {trend: 'Trend baseline', rsi: 'RSI baseline', ai_trend: 'AI-assisted trend'};
+const labels = {trend: 'Trend baseline', rsi: 'RSI baseline', ai_trend: 'News-assisted trend', ml: 'Trained market model'};
 const assets = {BTCUSDT: 'Bitcoin', XRPUSDT: 'XRP', SOLUSDT: 'Solana', ETHUSDT: 'Ethereum'};
 const fmt = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? '—' : new Intl.NumberFormat('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits}).format(Number(value));
 const when = value => value ? new Date(typeof value === 'number' ? value * 1000 : value).toISOString().replace('T', ' ').slice(0, 19) : '—';
@@ -165,9 +165,9 @@ function renderMarket() {
   const nextAssessmentKey = JSON.stringify([symbol, ai?.id, snapshot.ai_configured]);
   if (assessmentKey !== nextAssessmentKey) {
   assessmentKey = nextAssessmentKey;
-  $('aiTitle').textContent = ai ? 'The latest recorded assessment.' : snapshot.ai_configured ? 'Waiting for fresh news.' : 'AI is not configured.';
+  $('aiTitle').textContent = ai ? 'The latest recorded assessment.' : snapshot.ai_configured ? 'Waiting for fresh news.' : 'News AI is not configured.';
   $('newsScore').textContent = ai ? fmt(ai.payload.score, 2) : '—'; $('newsScore').classList.toggle('negative', ai?.payload.score < 0);
-  $('aiSummary').textContent = ai?.payload.summary || 'The AI portfolio will remain flat until its model and required market context are available.';
+  $('aiSummary').textContent = ai?.payload.summary || 'The news-assisted portfolio waits for a configured news model. The trained market model can run independently.';
   $('aiAt').textContent = ai ? `Available ${when(ai.at)} UTC · ${ai.payload.model}` : '';
   $('aiSources').replaceChildren(...(ai?.payload.sources || []).map(s => safeLink(s.url, s.title)));
   }
@@ -179,7 +179,33 @@ function renderMarket() {
   }));
   if (!snapshot.news.length) $('newsItems').append(element('p', 'No news recorded yet.', 'empty'));
   }
-  updateFreshness();
+  renderModel(); updateFreshness();
+}
+function renderModel() {
+  const model = snapshot.market_models?.find(m => m.symbol === $('botSymbol').value);
+  const jobs = snapshot.jobs?.filter(j => j.kind === 'train' && j.params.symbol === $('botSymbol').value && ['queued', 'running'].includes(j.status)) || [];
+  $('marketModelTitle').textContent = `${assets[$('botSymbol').value]} · ${model ? 'trained price model' : 'ready to train'}`;
+  $('useModelConfig').hidden = !model;
+  const key = JSON.stringify([model?.version, jobs.map(j => [j.id, j.status, j.result])]);
+  if ($('marketModelPanel').dataset.contentKey === key) return;
+  $('marketModelPanel').dataset.contentKey = key;
+  $('marketModelMetrics').replaceChildren(); $('marketModelMethod').replaceChildren();
+  $('marketModelDetails').hidden = !model;
+  const jobStatus = jobs.length ? `Training ${jobs[0].status}: ${jobs[0].result?.stage || 'waiting for the research worker'}. ` : '';
+  $('marketModelStatus').textContent = jobStatus + (model ? `${model.report.assessment} Version ${model.version.slice(0, 12)} · ${fmt(model.report.candles, 0)} candles · trained ${when(model.created_at)} UTC. Start a new paper run to use it.` : 'No saved model for this asset. Training runs on the research worker and needs no AI API key.');
+  if (!model) return;
+  const table = element('table'), caption = element('caption', 'Final held-out period · candle simulation after costs'), head = element('thead'), tr = element('tr');
+  for (const title of ['Strategy', 'Net return', 'Max drawdown', 'Closed trades', 'Fees, USDT']) tr.append(element('th', title));
+  head.append(tr); const body = element('tbody');
+  for (const [strategy, m] of Object.entries(model.report.holdout.metrics)) {
+    const row = element('tr'); [labels[strategy], `${fmt(m.return_pct)}%`, `${fmt(m.max_drawdown_pct)}%`, fmt(m.closed_trades, 0), fmt(m.fees)].forEach(text => row.append(element('td', text))); body.append(row);
+  }
+  table.append(caption, head, body); $('marketModelMetrics').append(table);
+  const report = model.report, test = report.test;
+  for (const text of [report.selection, report.label,
+    `Test classification: ${fmt(test.samples, 0)} samples · AUC ${fmt(test.auc, 3)} · log loss ${fmt(test.log_loss, 4)} versus ${fmt(test.constant_log_loss, 4)} for the training-rate baseline (lower is better).`,
+    `Data: ${when(report.data_start)}–${when(report.data_end)} UTC. Model expires ${when(model.expires_at)} UTC.`,
+    report.scope, report.holdout.assumptions, report.caution, `Snapshot fingerprint: ${report.provenance?.data_sha256 || '—'}`]) $('marketModelMethod').append(element('p', text));
 }
 function updateDates(force = false) {
   const market = currentMarket(); if (!market) return;
@@ -217,8 +243,8 @@ function renderRunLists() {
     }
     card.querySelector('h3').textContent = run.name;
     card.querySelector('.run-state').textContent = `${run.runtime?.status || run.status}${run.entries_paused ? ' · entries paused' : ''}${run.flatten_requested ? ' · flatten pending' : ''} · ${when(run.started_at)} UTC`;
-    const value = run.metrics?.ai_trend?.return_pct ?? run.metrics?.trend?.return_pct;
-    card.querySelector('.run-return').textContent = value == null ? '' : `${run.mode === 'candles' ? 'Trend holdout' : run.mode === 'replay' ? 'AI holdout' : 'AI portfolio'}: ${fmt(value)}% · virtual capital ${fmt(run.config.capital, 0)} USDT`;
+    const value = run.metrics?.ml?.return_pct ?? run.metrics?.ai_trend?.return_pct ?? run.metrics?.trend?.return_pct;
+    card.querySelector('.run-return').textContent = value == null ? '' : `${run.mode === 'candles' ? 'Trend holdout' : run.mode === 'replay' ? 'News AI holdout' : run.metrics?.ml ? 'Trained model' : 'News AI portfolio'}: ${fmt(value)}% · virtual capital ${fmt(run.config.capital, 0)} USDT`;
     card.querySelector('.run-error').textContent = run.error || '';
     card.querySelector('.run-error').hidden = !run.error;
   }
@@ -245,6 +271,7 @@ function renderJobs() {
     }
     row.append(element('span', job.error || when(job.created_at)));
     if (job.result?.run_id) row.append(actionButton('View result', () => inspect(job.result.run_id, true)));
+    if (job.kind === 'train') row.append(element('span', job.result?.stage || 'Waiting for the research worker'));
     return row;
   }));
 }
@@ -271,7 +298,7 @@ async function refresh(force = true) {
     const activeLive = snapshot.runs.some(r => r.mode === 'live' && ['running', 'reconciling'].includes(r.status));
     $('executionBadge').textContent = activeLive ? snapshot.execution_environment : 'Paper trading';
     const stale = snapshot.sources.some(s => ['stale', 'disconnected', 'error'].includes(s.status));
-    message(`Updated ${when(snapshot.now)} UTC · ${stale ? 'Some feeds or workers need attention.' : 'Dashboard connected.'} ${snapshot.ai_configured ? '' : 'AI model not configured.'}`, stale);
+    message(`Updated ${when(snapshot.now)} UTC · ${stale ? 'Some feeds or workers need attention.' : 'Dashboard connected.'} ${snapshot.market_models?.length || 0}/4 trained market models. ${snapshot.ai_configured ? '' : 'Optional news AI not configured.'}`, stale);
     if (incoming.detail && selectedId === requestedId) renderRunDetail(incoming.detail, false);
     else if (full && selectedId) await inspect(selectedId, false);
   } catch (error) {
@@ -294,7 +321,7 @@ function renderRunDetail(run, scroll) {
   const id = run.id;
   inspectedRun = run; detailSeenAt = performance.now();
   $('runInspector').hidden = false; $('inspectorTitle').textContent = run.name;
-  $('inspectorStatus').textContent = `${run.mode} · ${run.status} · ${run.error || 'Settings are frozen for this experiment.'}`;
+  $('inspectorStatus').textContent = `${run.mode} · ${run.status} · ${run.error || 'Settings are frozen for this experiment.'}${run.market_model ? ` Model version ${run.market_model.version.slice(0, 12)}.` : ''}`;
   const nextControlsKey = JSON.stringify([id, run.mode, run.status, run.entries_paused, run.flatten_requested]);
   if (controlsKey !== nextControlsKey) {
   controlsKey = nextControlsKey; $('runControls').replaceChildren();
@@ -351,13 +378,13 @@ function drawCurve() {
   const ratio = window.devicePixelRatio || 1; canvas.width = Math.round(rect.width * ratio); canvas.height = Math.round(rect.height * ratio);
   const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio); const w = rect.width, h = rect.height;
   if (!curve?.length || curve.length < 2) { ctx.fillStyle = '#959eaf'; ctx.font = '13px system-ui'; ctx.fillText('Equity history appears as completed candles arrive.', 20, h / 2); return; }
-  const all = curve.flatMap(row => ['trend', 'rsi', 'ai_trend'].map(k => row[k]).filter(Number.isFinite));
+  const all = curve.flatMap(row => ['trend', 'rsi', 'ai_trend', 'ml'].map(k => row[k]).filter(Number.isFinite));
   let low = Math.min(...all), high = Math.max(...all); const pad = Math.max((high - low) * .1, high * .001); low -= pad; high += pad;
   const left = 68, right = 18, top = 20, bottom = 30, start = curve[0].at, end = curve.at(-1).at;
   const x = t => left + (t - start) / Math.max(1, end - start) * (w - left - right), y = v => top + (high - v) / (high - low) * (h - top - bottom);
   ctx.font = '10px ui-monospace, monospace';
   for (let i = 0; i < 5; i++) { const value = low + (high - low) * i / 4, yy = y(value); ctx.strokeStyle = '#29313d'; ctx.beginPath(); ctx.moveTo(left, yy); ctx.lineTo(w - right, yy); ctx.stroke(); ctx.fillStyle = '#959eaf'; ctx.fillText(fmt(value, 0), 8, yy + 4); }
-  for (const [key, color] of [['trend', '#8ea8ff'], ['rsi', '#dfb773'], ['ai_trend', '#39d3a2']]) {
+  for (const [key, color] of [['trend', '#8ea8ff'], ['rsi', '#dfb773'], ['ai_trend', '#39d3a2'], ['ml', '#c798ff']]) {
     ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.beginPath(); let drawing = false;
     for (const row of curve) if (Number.isFinite(row[key])) { if (!drawing) { ctx.moveTo(x(row.at), y(row[key])); drawing = true; } else ctx.lineTo(x(row.at), y(row[key])); }
     ctx.stroke();
@@ -369,6 +396,22 @@ $('loginForm').onsubmit = e => { e.preventDefault(); busy(e.submitter, async () 
   await api('session/'); const data = await api('login/', {username: $('username').value, password: $('password').value}); $('password').value = ''; showWorkspace(data.username); await refresh();
 }); };
 $('logout').onclick = () => busy($('logout'), async () => { await api('logout/', {}); showAuth(); message('Signed out.'); });
+async function queueModels(symbols) {
+  let queued = 0;
+  try {
+    for (const symbol of symbols) {
+      if (snapshot.jobs.some(j => j.kind === 'train' && j.params.symbol === symbol && ['queued', 'running'].includes(j.status))) continue;
+      await api('jobs/', {kind: 'train', symbol, count: 100000, config: readConfig()}); ++queued;
+    }
+    message(`${queued} model training jobs queued. Start new paper runs after training finishes.`);
+  } finally { await refresh(); }
+}
+$('trainModel').onclick = () => busy($('trainModel'), () => queueModels([$('botSymbol').value]));
+$('trainAllModels').onclick = () => busy($('trainAllModels'), () => queueModels(snapshot.markets.map(m => m.symbol)));
+$('useModelConfig').onclick = () => {
+  const model = snapshot.market_models.find(m => m.symbol === $('botSymbol').value);
+  if (model) { selectedValidation = null; setConfig(model.config); $('validationNote').textContent = 'Using the trained model’s evaluated settings. No event replay linked.'; message('Evaluated model settings selected for the next paper run.'); }
+};
 $('historyForm').onsubmit = e => { e.preventDefault(); busy(e.submitter, async () => {
   const scope = e.submitter.value === 'all' ? {symbols: snapshot.markets.map(m => m.symbol)} : {symbol: $('botSymbol').value};
   await api('jobs/', {kind: 'history', ...scope, count: Number($('historyCount').value), ...($('historyEnd').value ? {end: Date.parse($('historyEnd').value+'Z')/1000} : {})});

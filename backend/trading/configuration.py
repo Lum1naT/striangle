@@ -2,7 +2,7 @@ import hashlib
 import json
 from decimal import Decimal, InvalidOperation
 
-ENGINE_VERSION = "1.1.0"
+ENGINE_VERSION = "1.2.0"
 PROMPT_VERSION = "news-v1"
 STRATEGIES = ("trend", "rsi", "ai_trend")
 DEFAULTS = {
@@ -60,6 +60,9 @@ def validate_config(raw=None):
     return result
 
 
-def fingerprint(config, model=""):
+def fingerprint(config, model="", market_model=""):
     # Capital is deliberately included: no unreviewed sizing changes in a promoted run.
-    return hashlib.sha256(json.dumps({"config": config, "engine": ENGINE_VERSION, "model": model, "prompt": PROMPT_VERSION}, sort_keys=True).encode()).hexdigest()
+    values = {"config": config, "engine": ENGINE_VERSION, "model": model, "prompt": PROMPT_VERSION}
+    if market_model:
+        values["market_model"] = market_model
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
