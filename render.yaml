@@ -61,7 +61,7 @@ projects:
             plan: starter
             numInstances: 1
             buildCommand: pip install -r backend/requirements.lock.txt
-            startCommand: python backend/manage.py wait_for_database && python backend/manage.py record_market
+            startCommand: python backend/manage.py wait_for_database && exec python backend/manage.py record_market
             maxShutdownDelaySeconds: 60
             autoDeployTrigger: checksPass
             envVars:
@@ -77,7 +77,7 @@ projects:
             plan: starter
             numInstances: 1
             buildCommand: pip install -r backend/requirements.lock.txt
-            startCommand: python backend/manage.py wait_for_database && python backend/manage.py bot_worker
+            startCommand: python backend/manage.py wait_for_database && exec python backend/manage.py bot_worker
             maxShutdownDelaySeconds: 60
             autoDeployTrigger: checksPass
             envVars:
@@ -93,7 +93,7 @@ projects:
             plan: starter
             numInstances: 1
             buildCommand: pip install -r backend/requirements.lock.txt
-            startCommand: python backend/manage.py wait_for_database && python backend/manage.py research_worker
+            startCommand: python backend/manage.py wait_for_database && exec python backend/manage.py research_worker
             maxShutdownDelaySeconds: 300
             autoDeployTrigger: checksPass
             envVars:

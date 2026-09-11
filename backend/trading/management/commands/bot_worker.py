@@ -21,7 +21,7 @@ class Command(BaseCommand):
         stop = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
-        with single_worker("trader") as check:
+        with single_worker("trader", stop) as check:
             try:
                 while not stop.is_set():
                     check()

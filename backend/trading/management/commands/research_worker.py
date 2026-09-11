@@ -20,7 +20,7 @@ class Command(BaseCommand):
         stop = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
-        with single_worker("research") as check:
+        with single_worker("research", stop) as check:
             Job.objects.filter(status="running").update(status="failed", error="Research worker restarted before completion; submit a new job", finished_at=timezone.now())
             try:
                 while not stop.is_set():

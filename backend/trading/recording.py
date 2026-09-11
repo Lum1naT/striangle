@@ -17,6 +17,7 @@ from .models import Candle, Event, Heartbeat
 from .providers import fetch_heatmap, fetch_news, normalize_binance, normalize_bybit, observation
 
 log = logging.getLogger(__name__)
+_logged_heartbeats = {}
 
 
 def stamp(value):
@@ -25,6 +26,11 @@ def stamp(value):
 
 def heartbeat(name, status, detail=""):
     Heartbeat.objects.update_or_create(name=name, defaults={"updated_at": timezone.now(), "status": status, "detail": detail[:300]})
+    now = time.monotonic()
+    previous_status, last_log = _logged_heartbeats.get(name, (None, 0))
+    if status != previous_status or now-last_log >= 60:
+        log.info("heartbeat=%s status=%s detail=%s", name, status, detail[:300])
+        _logged_heartbeats[name] = (status, now)
 
 
 def store_batch(batch):

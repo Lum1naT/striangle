@@ -1,9 +1,12 @@
 from unittest.mock import MagicMock, patch
+import threading
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import OperationalError
 from django.test import SimpleTestCase
+
+from trading.locking import single_worker
 
 
 COMMAND = "trading.management.commands.wait_for_database"
@@ -33,3 +36,41 @@ class DatabaseStartupTests(SimpleTestCase):
         connection.cursor.side_effect = OperationalError("unreachable")
         with self.assertRaisesMessage(CommandError, "not accepting connections after 300 seconds"):
             call_command("wait_for_database", connection_only=True)
+
+
+@patch("trading.locking.settings")
+@patch("psycopg.connect")
+class WorkerOwnershipTests(SimpleTestCase):
+    def prepare(self, connect, settings):
+        settings.DATABASES = {"default": {"ENGINE": "django.db.backends.postgresql", "NAME": "fixture"}}
+        return connect.return_value.__enter__.return_value
+
+    @patch("trading.locking.time.sleep")
+    def test_replacement_does_no_work_until_previous_owner_releases(self, sleep, connect, settings):
+        connection = self.prepare(connect, settings)
+        connection.execute.return_value.fetchone.side_effect = [(False,), (True,)]
+        processed = []
+        sleep.side_effect = lambda _: self.assertEqual(processed, [])
+        with single_worker("trader"):
+            processed.append("work")
+        self.assertEqual(processed, ["work"])
+        sleep.assert_called_once_with(1)
+        connect.return_value.__exit__.assert_called_once()
+
+    @patch("trading.locking.time.monotonic", side_effect=[0, 421])
+    def test_timeout_never_grants_ownership(self, monotonic, connect, settings):
+        connection = self.prepare(connect, settings)
+        connection.execute.return_value.fetchone.return_value = (False,)
+        with self.assertRaisesMessage(CommandError, "still owns the lock"):
+            with single_worker("trader"):
+                self.fail("Work began without ownership")
+
+    def test_shutdown_while_waiting_exits_without_processing(self, connect, settings):
+        connection = self.prepare(connect, settings)
+        stop = threading.Event()
+        stop.set()
+        with self.assertRaises(SystemExit) as stopped:
+            with single_worker("research", stop):
+                self.fail("Work began during shutdown")
+        self.assertEqual(stopped.exception.code, 0)
+        connection.execute.assert_not_called()
