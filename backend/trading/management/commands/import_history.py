@@ -29,9 +29,12 @@ class Command(BaseCommand):
         with single_worker("history_import", stop):
             for symbol in symbols:
                 self.stdout.write(f"Importing {options['count']:,} completed candles for {symbol}")
+                last_report = 0
                 def checkpoint(progress):
-                    if progress["candles"] % 10000 == 0:
+                    nonlocal last_report
+                    if progress["candles"]-last_report >= 10000 or progress["candles"] == progress["requested"]:
                         self.stdout.write(f"{symbol}: {progress['candles']:,}/{progress['requested']:,} processed")
+                        last_report = progress["candles"]
                 try:
                     result = import_history(symbol, options["count"], end_ms=end_ms, save_checkpoint=checkpoint, stop=stop)
                 except HistoryPaused:
