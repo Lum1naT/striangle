@@ -70,6 +70,21 @@ try {
     assert.equal(await page.locator('#exportCandles').getAttribute('href'),`/api/candles.csv?symbol=${symbol}`);
   }
   await page.locator('#botSymbol').selectOption('BTCUSDT');
+  const recordQuote = (id, bid, ask) => manage('shell', '-c', `from django.utils import timezone; from trading.models import Event; now=timezone.now(); Event.objects.create(source='ui-fixture', source_id='${id}', symbol='BTCUSDT', kind='book', event_at=now, received_at=now, available_at=now, payload={'bids': [['${bid}', '10']], 'asks': [['${ask}', '10']]})`);
+  recordQuote(1, '100', '100.1');
+  await page.getByText('100.05 USDT', {exact:true}).first().waitFor();
+  assert.match(await page.locator('#liveConnection').textContent(), /Live updates/);
+  await page.locator('[data-market="BTCUSDT"]').focus();
+  recordQuote(2, '100.1', '100.2');
+  await page.getByText('100.15 USDT', {exact:true}).first().waitFor();
+  assert.equal(await page.locator('[data-market="BTCUSDT"]').evaluate(node => node === document.activeElement), true, 'Live updates must preserve keyboard focus');
+  await page.context().setOffline(true);
+  await page.getByText('Browser offline', {exact:true}).waitFor();
+  await page.locator('#bookFreshness').filter({hasText:'Stale book'}).waitFor();
+  await page.context().setOffline(false);
+  recordQuote(3, '100.2', '100.3');
+  await page.getByText('100.25 USDT', {exact:true}).first().waitFor();
+  await page.locator('#bookFreshness').filter({hasText:'Live book'}).waitFor();
   await assertFits();
   await screenshot('dashboard-desktop');
 
@@ -91,7 +106,8 @@ try {
   const run = await response.json();
   await page.locator('#runInspector').waitFor({state: 'visible'});
   assert.equal(await page.locator('#comparisonMetrics .comparison-card').count(), 3);
-  assert.match(await page.locator('#decisionJournal').textContent(), /Waiting for a completed candle/);
+  assert.match(await page.locator('#decisionJournal').textContent(), /Waiting for live market data/);
+  assert.match(await page.locator('#runActivity').textContent(), /signal checks every 1 s/);
   await page.getByRole('button', {name: 'Pause entries', exact: true}).click();
   await page.getByRole('button', {name: 'Resume entries', exact: true}).waitFor();
   await screenshot('paper-desktop');

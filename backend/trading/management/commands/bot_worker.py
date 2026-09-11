@@ -1,5 +1,6 @@
 import signal
 import threading
+import time
 
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
@@ -23,18 +24,22 @@ class Command(BaseCommand):
             signal.signal(sig, lambda *_: stop.set())
         with single_worker("trader", stop) as check:
             try:
+                last_heartbeat = 0
                 while not stop.is_set():
                     check()
                     close_old_connections()
+                    backlog = False
                     for run_id, mode in Run.objects.filter(mode__in=["paper", "live"], status__in=["running", "reconciling"]).values_list("id", "mode"):
-                        process_run(run_id)
+                        backlog = process_run(run_id) or backlog
                         if mode == "live":
                             live_tick(run_id)
                         if stop.is_set():
                             break
-                    heartbeat("trader", "running", "Paper comparisons and order reconciliation")
+                    if time.monotonic()-last_heartbeat >= 5:
+                        heartbeat("trader", "running", "Continuous paper comparisons and order reconciliation; 250 ms idle polling")
+                        last_heartbeat = time.monotonic()
                     if options["once"]:
                         break
-                    stop.wait(1)
+                    stop.wait(0 if backlog else 0.25)
             finally:
                 heartbeat("trader", "stopped")

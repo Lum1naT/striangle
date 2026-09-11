@@ -17,7 +17,8 @@ from .recording import heartbeat, stamp
 
 def as_event(row):
     return {"id": row.id, "at": max(row.available_at.timestamp(), row.received_at.timestamp()),
-            "kind": row.kind, "payload": row.payload, "event_at": row.event_at.timestamp()}
+            "kind": row.kind, "payload": row.payload, "event_at": row.event_at.timestamp(),
+            "received_at": row.received_at.timestamp()}
 
 
 def replay(events, config, strategies=("trend", "rsi", "ai_trend")):

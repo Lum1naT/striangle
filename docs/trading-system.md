@@ -2,7 +2,7 @@
 
 Striangle now has a Django backend, durable observations and trading ledgers, an authenticated operations dashboard at `/bots.html`, and three independently supervised workers. The original static chart, PWA and browser optimizer remain available at `/`.
 
-Initial execution scope is **BTC/USDT, XRP/USDT, SOL/USDT and ETH/USDT, unleveraged Binance spot, long only, one-minute signals**. Bybit derivatives provide context. No futures positions, borrowing, leverage or withdrawal API calls are implemented. The frontend remains plain JavaScript modules; there is no frontend framework migration.
+Initial execution scope is **BTC/USDT, XRP/USDT, SOL/USDT and ETH/USDT, unleveraged Binance spot, long only, continuous signal checks using completed one-minute indicators**. Bybit derivatives provide context. No futures positions, borrowing, leverage or withdrawal API calls are implemented. The frontend remains plain JavaScript modules; there is no frontend framework migration.
 
 ## Local setup
 
@@ -71,7 +71,13 @@ Comparisons include return after modeled costs, drawdown, fees, closed trades an
 
 ## 3. Paper trade on live feeds
 
-Select **Use for paper** on a research run to carry its exact configuration into a forward experiment, or start an unlinked experiment using the current settings. Active configurations cannot be edited. A new experiment starts after the latest recorded event and warms up from new, consecutive candles.
+Select **Use for paper** on a research run to carry its exact configuration into a forward experiment, or choose **Start real-time paper** for an unlinked experiment using the current settings. Active configurations cannot be edited. A new experiment starts after the latest recorded event. Up to 201 already-fetched, completed, consecutive candles seed its indicators, and already-known context retains its original timestamps. Future/unavailable candles and missing-minute bridges are excluded. Seed data creates no trades, returns, decisions or forward-evidence credit. Insufficient or stale history still blocks entries until enough current data is available.
+
+New configurations use `decision_interval_seconds=1` (bounded to 1–60). Incoming books, flow and derivatives trigger checks at this cadence; a new completed candle, assessment or feed gap triggers an immediate check. SMA and RSI inputs remain completed one-minute candles. An adverse news assessment can therefore request an exit between candle closes. The worker polls for new events every 250 ms when idle, immediately drains a full batch, and avoids rewriting idle portfolios. Signals and fills remain ordered by recorded event ID; an order cannot fill on the same book which proposed it. Every pending buy is revalidated against current context before filling. Following a completed exit, re-entry waits for the next completed candle.
+
+The authenticated `/api/realtime/` endpoint omits historical counts and coverage queries. The dashboard requests it approximately every second, with full metadata every 30 seconds; requests never overlap, failures back off, returning online refreshes immediately, and hidden tabs stop polling. Quote freshness continues to age even when requests fail. Inspectors show current signal reasons, indicator readiness, last evaluation and measured receipt-to-processing delay. Controls keep their focus and expanded journal entries survive refreshes. Runs execute on the server independently of the browser. These are software scheduling targets, not a guaranteed exchange-to-execution latency or an HFT service.
+
+RSS is polled every 120 seconds and optional AI news assessments every 300 seconds; the latest valid assessment is reused. Increasing market decision frequency does not increase model-call frequency. Prior configurations without `decision_interval_seconds` keep their candle-close cadence. Engine version 1.1.0 changes the validation fingerprint, so older research evidence cannot automatically promote the new behavior into live trading.
 
 Three independent virtual portfolios receive identical subsequent data and costs:
 
@@ -81,7 +87,7 @@ Three independent virtual portfolios receive identical subsequent data and costs
 
 AI is currently a **news interpretation layer feeding explicit entry rules**. There is no trained numerical price prediction model, autonomous code rewriting, arbitrary strategy code execution, reinforcement learner or profitability guarantee.
 
-Every closed-bar evaluation stores the action, human-readable reason, inputs and event ID. Risk sizing limits the allocation by both available cash and estimated stop loss plus costs. Daily loss and peak drawdown limits prevent new entries and request exits. **Pause entries** preserves risk exits. **Flatten & stop** exits on the next available book and stops only when flat; this is a request, not an instantaneous guaranteed fill. A delayed worker never retrospectively opens paper positions at old quotes. The database atomically checkpoints wallets, decisions and fills so restart replay cannot double-charge them.
+Changed proposals, protective exits and every closed-bar evaluation store the action, human-readable reason, inputs and event ID. Identical holds are journaled at most once a minute while the current signal view continues updating. Risk sizing limits the allocation by both available cash and estimated stop loss plus costs. Daily loss and peak drawdown limits prevent new entries and request exits. **Pause entries** preserves risk exits, which are checked on every book update independently of signal throttling. **Flatten & stop** exits on a later available book and stops only when flat; this is a request, not an instantaneous guaranteed fill. The entry gate rejects books older than the configured receipt-age limit (five seconds by default) and indicators whose last candle closed over 90 seconds ago. Database persistence delays do not make an old book fresh. The database atomically checkpoints wallets, decisions and fills so restart replay cannot double-charge them.
 
 ## 4. Controlled live execution
 

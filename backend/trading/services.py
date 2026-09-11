@@ -4,7 +4,7 @@ from django.utils import timezone
 
 from .configuration import dec, fingerprint, validate_config
 from .engine import initial_state, metrics, step
-from .models import Decision, Event, Fill, Run
+from .models import Candle, Decision, Event, Fill, Run
 from .recording import stamp
 from .research import as_event
 
@@ -16,11 +16,32 @@ def create_paper(owner, symbol, raw_config, validation=None):
         raise ValueError("Validation must be your completed research run with identical symbol, model and settings")
     if Run.objects.filter(owner=owner, mode="paper", status="running").count() >= 10:
         raise ValueError("At most ten paper experiments can run at once")
-    last = Event.objects.order_by("-id").first()
+    started = timezone.now()
+    last = Event.objects.filter(available_at__lte=started, received_at__lte=started).order_by("-id").first()
     state = initial_state(config)
+    # Indicator context is known at start; portfolios still have no historical
+    # trades, decisions, returns or forward-evidence credit.
+    recent = list(Candle.objects.filter(symbol=symbol, interval="1m", fetched_at__lte=started,
+        closed_at__lte=started).order_by("-opened_at")[:201])
+    consecutive = []
+    for candle in recent:
+        if consecutive and consecutive[-1].opened_at != candle.closed_at:
+            break
+        consecutive.append(candle)
+    if consecutive:
+        state["market"].update(closes=[float(c.payload["close"]) for c in reversed(consecutive)],
+            last_opened=consecutive[0].opened_at.timestamp(), last_closed_at=consecutive[0].closed_at.timestamp())
+    state["warmup"] = {"seeded_candles": len(consecutive), "at": started.timestamp()}
+    if last:
+        for kind in ("derivatives", "assessment", "heatmap"):
+            context = Event.objects.filter(symbol=symbol, kind=kind, id__lte=last.id,
+                received_at__lte=started, available_at__lte=started).order_by("-received_at", "-id").first()
+            if context:
+                state["market"][kind] = context.payload | {"at": context.received_at.timestamp(), "id": context.id}
     state["last_id"] = last.id if last else 0
     return Run.objects.create(owner=owner, name=f"{symbol} forward comparison", symbol=symbol, mode="paper",
-        config=config, config_hash=digest, state=state, results=metrics(state, config), validation=validation, last_event_id=state["last_id"])
+        config=config, config_hash=digest, state=state, results=metrics(state, config), validation=validation,
+        started_at=started, last_event_id=state["last_id"])
 
 
 def persist_audit(run, decisions, fills):
@@ -32,11 +53,14 @@ def process_run(run_id):
     with transaction.atomic():
         run = Run.objects.select_for_update().get(pk=run_id)
         if run.status not in ("running", "reconciling"):
-            return
+            return False
         rows = list(Event.objects.filter(symbol=run.symbol, id__gt=run.last_event_id).exclude(kind="ai_attempt").order_by("id")[:1500])
+        if not rows and not run.flatten_requested:
+            return False
         decisions, fills = [], []
         now = timezone.now().timestamp()
         for row in rows:
+            now = timezone.now().timestamp()
             ds, fs = step(run.state, as_event(row), run.config, paused=run.entries_paused or run.status == "reconciling",
                           flatten=run.flatten_requested, execution_now=now, execute=run.mode == "paper")
             decisions.extend(ds)
@@ -50,11 +74,14 @@ def process_run(run_id):
                     if day not in evidence["days"]:
                         evidence["days"].append(day)
             run.last_event_id = row.id
+            run.state["runtime"] = {"processed_at": now, "received_at": row.received_at.timestamp(),
+                "processing_delay_seconds": max(0, now-row.received_at.timestamp()), "event_id": row.id}
         if run.mode == "paper" and run.flatten_requested and all(dec(w["qty"]) == 0 for w in run.state["wallets"].values()):
             run.status, run.ended_at = "stopped", timezone.now()
         run.results = metrics(run.state, run.config)
         persist_audit(run, decisions, fills)
         run.save(update_fields=["state", "results", "last_event_id", "status", "ended_at"])
+        return len(rows) == 1500
 
 
 def readiness(paper, include_environment=True):

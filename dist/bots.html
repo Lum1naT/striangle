@@ -25,7 +25,7 @@
     </section>
     <div id="workspace" hidden>
       <section class="bot-heading"><div><span class="eyebrow">TRADING OPERATIONS</span><h1>From signal to evidence.</h1><p>Every observation recorded. Every decision explained.</p></div>
-        <div class="heading-controls"><span id="executionBadge" class="mode-badge">Paper trading</span><label>Market<select id="botSymbol"><option value="BTCUSDT">BTC / USDT</option><option value="XRPUSDT">XRP / USDT</option><option value="SOLUSDT">SOL / USDT</option><option value="ETHUSDT">ETH / USDT</option></select></label></div>
+        <div class="heading-controls"><span id="liveConnection" class="live-connection">Connecting…</span><span id="executionBadge" class="mode-badge">Paper trading</span><label>Market<select id="botSymbol"><option value="BTCUSDT">BTC / USDT</option><option value="XRPUSDT">XRP / USDT</option><option value="SOLUSDT">SOL / USDT</option><option value="ETHUSDT">ETH / USDT</option></select></label></div>
       </section>
       <div id="assetOverview" class="asset-overview" aria-label="Your four assets"></div>
       <nav class="stage-nav" aria-label="Development stages">
@@ -74,8 +74,9 @@
         <article class="panel"><span class="eyebrow">COMPLETED RESEARCH</span><h2>Training chooses. Holdout evaluates.</h2><div id="researchRuns" class="run-list"></div></article>
       </section>
       <section id="paperPanel" class="operation-section" hidden>
-        <article class="panel start-paper"><div><span class="eyebrow">FORWARD COMPARISON</span><h2>Same market. Three independent portfolios.</h2><p>Trend, RSI and AI-assisted trend each start with the same virtual capital and cost assumptions.</p><p id="validationNote" class="muted small">Uses the current experiment settings. No research run linked.</p></div><button id="startPaper" class="primary">Start paper experiment</button></article>
-        <p class="muted small">Strategies warm up on consecutive completed 1-minute candles. The AI portfolio waits when required context is missing. Pausing prevents new entries; protective exits continue.</p>
+        <article class="panel start-paper"><div><span class="eyebrow">REAL-TIME FORWARD COMPARISON</span><h2>Same market. Three independent portfolios.</h2><p>Trend, RSI and AI-assisted trend each start with the same virtual capital and cost assumptions. Runs continue on the server when you close this page.</p><p id="validationNote" class="muted small">Uses the current experiment settings. No research run linked.</p></div><button id="startPaper" class="primary">Start real-time paper</button></article>
+        <p class="muted small">New runs check signals every second as data arrives. Recent saved candles prepare the indicators immediately when sufficient consecutive history is available. Only completed 1-minute candles enter indicators. Protective exits check every book update; stale data blocks entries. The AI portfolio waits when required context is missing.</p>
+        <p class="muted small">News is checked every 2 minutes; AI news assessments every 5 minutes when configured. The latest available assessment is reused between updates. Actual processing delay is shown in each run.</p>
         <div id="paperRuns" class="run-list"></div>
       </section>
       <section id="livePanel" class="operation-section" hidden>
@@ -86,7 +87,7 @@
       </section>
       <section id="runInspector" class="panel inspector" hidden>
         <div class="panel-top"><div><span class="eyebrow">EXPERIMENT DETAIL</span><h2 id="inspectorTitle"></h2></div><button id="closeInspector" aria-label="Close experiment details">Close</button></div>
-        <p id="inspectorStatus" class="muted"></p><div id="runControls" class="run-controls"></div>
+        <p id="inspectorStatus" class="muted"></p><p id="runActivity" class="runtime-strip" hidden></p><div id="runControls" class="run-controls"></div>
         <div id="comparisonMetrics" class="comparison-grid"></div>
         <div class="curve-heading"><h3>Portfolio equity · USDT</h3><span>Trend <i class="legend-dot trend"></i> RSI <i class="legend-dot rsi"></i> AI <i class="legend-dot ai"></i></span></div>
         <canvas id="portfolioCurve" role="img" aria-label="Portfolio equity over time. Exact final values are shown in the comparison cards."></canvas>

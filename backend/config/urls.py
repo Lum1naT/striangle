@@ -11,6 +11,7 @@ urlpatterns = [
     path("api/login/", views.login_view),
     path("api/logout/", views.logout_view),
     path("api/dashboard/", views.dashboard),
+    path("api/realtime/", views.realtime),
     path("api/jobs/", views.jobs),
     path("api/jobs/<uuid:job_id>/resume/", views.resume_history),
     path("api/runs/", views.runs),

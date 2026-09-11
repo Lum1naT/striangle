@@ -2,7 +2,7 @@ import hashlib
 import json
 from decimal import Decimal, InvalidOperation
 
-ENGINE_VERSION = "1.0.0"
+ENGINE_VERSION = "1.1.0"
 PROMPT_VERSION = "news-v1"
 STRATEGIES = ("trend", "rsi", "ai_trend")
 DEFAULTS = {
@@ -12,6 +12,7 @@ DEFAULTS = {
     "max_spread_bps": 20, "max_participation_pct": 5,
     "fast": 10, "slow": 30, "rsi_period": 14, "oversold": 30, "overbought": 70,
     "max_book_age_seconds": 5, "max_signal_age_seconds": 30,
+    "decision_interval_seconds": 1,
     "ai_max_age_seconds": 900, "ai_min_score": 0.2,
     "min_imbalance": 0.05, "max_funding_rate": 0.001,
     "require_heatmap": False,
@@ -23,6 +24,7 @@ BOUNDS = {
     "daily_loss_pct": (0.1, 20), "max_spread_bps": (0.1, 100), "max_participation_pct": (0.1, 20),
     "fast": (2, 99), "slow": (3, 200), "rsi_period": (2, 100), "oversold": (1, 49), "overbought": (51, 99),
     "max_book_age_seconds": (1, 30), "max_signal_age_seconds": (1, 60),
+    "decision_interval_seconds": (1, 60),
     "ai_max_age_seconds": (60, 3600), "ai_min_score": (0, 1), "min_imbalance": (-1, 1), "max_funding_rate": (0, 0.01),
 }
 
@@ -47,7 +49,7 @@ def validate_config(raw=None):
         if not dec(lo) <= value <= dec(hi):
             raise ValueError(f"{key} must be between {lo} and {hi}")
         result[key] = float(value)
-    for key in ("fast", "slow", "rsi_period", "max_book_age_seconds", "max_signal_age_seconds", "ai_max_age_seconds"):
+    for key in ("fast", "slow", "rsi_period", "max_book_age_seconds", "max_signal_age_seconds", "ai_max_age_seconds", "decision_interval_seconds"):
         if result[key] != int(result[key]):
             raise ValueError(f"{key} must be an integer")
         result[key] = int(result[key])

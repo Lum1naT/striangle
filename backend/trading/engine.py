@@ -1,7 +1,7 @@
 """Deterministic event replay and paper accounting. No I/O or model calls here.
 
-All contextual facts enter in recorded receipt order. Signals from a closed bar
-can fill only on a later book observation, never at that bar's historical open.
+All contextual facts enter in recorded availability order. Indicators use closed
+bars; signals can fill only on a later book observation, never on their own event.
 """
 from decimal import Decimal
 from statistics import mean
@@ -9,6 +9,7 @@ from statistics import mean
 from .configuration import STRATEGIES, dec
 
 ZERO = Decimal(0)
+MAX_CANDLE_AGE_SECONDS = 90
 
 
 def initial_state(config, strategies=STRATEGIES):
@@ -37,7 +38,8 @@ def features(market, at, config):
               "spread_bps": None, "flow_imbalance": None, "funding_rate": None,
               "open_interest": None, "liquidated_longs_usd": 0, "liquidated_shorts_usd": 0,
               "news_score": None, "news_summary": "", "news_sources": [], "assessment_id": None,
-              "heatmap": None, "missing": []}
+              "heatmap": None, "missing": [],
+              "candle_age_seconds": at-market["last_closed_at"] if "last_closed_at" in market else None}
     book = market.get("book")
     if book:
         bids, asks = book["bids"], book["asks"]
@@ -188,7 +190,48 @@ def simulate_fill(wallet, side, book, config, at, reason):
             "details": {"partial": side == "sell" and dec(wallet["qty"]) > 0, "model": "recorded_depth_with_participation_and_adverse_slippage"}}
 
 
-def step(state, event, config, *, paused=False, flatten=False, execution_now=None, execute=True):
+def proposal(name, wallet, market, f, now, config, paused=False, flatten=False):
+    action, reason = signal(name, f, dec(wallet["qty"]) > 0, config)
+    max_age = MAX_CANDLE_AGE_SECONDS if config.get("decision_interval_seconds") else config["max_signal_age_seconds"]
+    candle_age = now-market.get("last_closed_at", -1e20)
+    if action == "buy" and (paused or flatten or wallet["halted"] or not 0 <= candle_age <= max_age):
+        return "hold", "New entries blocked: " + (wallet["halted"] or "paused, stopping, or delayed market data") + "."
+    if action == "buy" and (f["spread_bps"] is None or f["spread_bps"] > config["max_spread_bps"]):
+        return "hold", "Fresh order book with acceptable spread is required."
+    if action == "buy" and config.get("decision_interval_seconds") and "exit_candle" in wallet and wallet["exit_candle"] == market.get("last_opened"):
+        return "hold", "Waiting for the next completed candle after an exit."
+    return action, reason
+
+
+def evaluate_signals(state, event, config, now, decisions, paused, flatten):
+    market = state["market"]
+    f = features(market, now, config)
+    state["evaluated_at"], state["evaluated_event_id"] = now, event["id"]
+    latest = state.setdefault("latest_signals", {})
+    handled = {d["strategy"]: d for d in decisions}
+    for name, wallet in state["wallets"].items():
+        if name in handled:
+            latest[name] = handled[name]
+            continue
+        action, reason = proposal(name, wallet, market, f, now, config, paused, flatten)
+        pending = wallet.get("pending")
+        if pending and pending["action"] == "buy" and action != "buy":
+            wallet["pending"] = None
+        elif pending and pending["action"] == "sell":
+            action, reason = "sell", pending["reason"]
+        if action != "hold" and not wallet.get("pending"):
+            wallet["pending"] = {"action": action, "at": now, "event_id": event["id"], "reason": reason}
+        decision = {"strategy": name, "event_id": event["id"], "at": now, "action": action, "reason": reason, "features": f}
+        latest[name] = decision
+        previous = wallet.get("journal", {})
+        # Keep every changed proposal and a minute-by-minute hold record, without
+        # writing identical hold messages on every tick.
+        if event["kind"] == "candle" or (action, reason) != (previous.get("action"), previous.get("reason")) or now-previous.get("at", 0) >= 60:
+            decisions.append(decision)
+            wallet["journal"] = {"action": action, "reason": reason, "at": now}
+
+
+def step(state, event, config, *, paused=False, flatten=False, execution_now=None, execute=True, decide=True):
     """Return audit records and fills while updating the serializable state."""
     at, kind, body = event["at"], event["kind"], event["payload"]
     if event["id"] <= state["last_id"]:
@@ -196,7 +239,8 @@ def step(state, event, config, *, paused=False, flatten=False, execution_now=Non
     state["last_id"] = event["id"]
     market, decisions, fills = state["market"], [], []
     now = at if execution_now is None else execution_now
-    fresh_execution = 0 <= now-at <= config["max_book_age_seconds"]
+    observed_at = event.get("received_at", at)
+    fresh_execution = 0 <= now-observed_at <= config["max_book_age_seconds"]
     if kind == "trade":
         key = str(int(at))
         bucket = market["tape"].setdefault(key, [0, 0])
@@ -210,15 +254,16 @@ def step(state, event, config, *, paused=False, flatten=False, execution_now=Non
         market["tape"][str(int(at))] = [float(body["buy_notional"]), float(body["sell_notional"])]
         market["tape"] = {t: v for t, v in market["tape"].items() if float(t) >= at-60}
     elif kind in ("derivatives", "assessment", "heatmap"):
-        market[kind] = body | {"at": at, "id": event["id"]}
+        market[kind] = body | {"at": observed_at, "id": event["id"]}
     elif kind == "gap":
         market.pop("book", None)
         market["closes"] = []
         market["tape"] = {}
+        market.pop("last_closed_at", None)
         for wallet in state["wallets"].values():
             wallet["pending"] = None
     elif kind == "book":
-        market["book"], market["book_at"] = body, at
+        market["book"], market["book_at"] = body, observed_at
         bid, ask = dec(body["bids"][0][0]), dec(body["asks"][0][0])
         spread = (ask-bid)/((ask+bid)/2)*10000
         for name, wallet in state["wallets"].items():
@@ -248,6 +293,12 @@ def step(state, event, config, *, paused=False, flatten=False, execution_now=Non
                 wallet["pending"] = None
                 pending = None
             if execute and fresh_execution and pending and event["id"] > pending["event_id"]:
+                if pending["action"] == "buy" and config.get("decision_interval_seconds"):
+                    action, reason = proposal(name, wallet, market, features(market, now, config), now, config, paused, flatten)
+                    if action != "buy":
+                        decisions.append({"strategy": name, "event_id": event["id"], "at": now, "action": "hold", "reason": "Entry cancelled: " + reason, "features": features(market, now, config)})
+                        wallet["pending"] = None
+                        continue
                 if pending["action"] == "buy" and spread > dec(config["max_spread_bps"]):
                     decisions.append({"strategy": name, "event_id": event["id"], "at": now, "action": "hold", "reason": "Entry cancelled: spread widened beyond its limit.", "features": {"spread_bps": float(spread)}})
                     wallet["pending"] = None
@@ -258,6 +309,8 @@ def step(state, event, config, *, paused=False, flatten=False, execution_now=Non
                     fills.append(fill)
                     if pending["action"] == "buy" or dec(wallet["qty"]) == 0:
                         wallet["pending"] = None
+                    if pending["action"] == "sell" and dec(wallet["qty"]) == 0:
+                        wallet["exit_candle"] = market.get("last_opened")
                     mark(wallet, bid, at, config)
     elif kind == "candle":
         opened = body["opened_at"]
@@ -267,21 +320,17 @@ def step(state, event, config, *, paused=False, flatten=False, execution_now=Non
         if previous is not None and opened-previous != 60:
             market["closes"] = []
         market["last_opened"] = opened
+        market["last_closed_at"] = float(body["closed_at"])
         market["closes"] = (market["closes"]+[float(body["close"])])[-201:]
-        f = features(market, at, config)
-        for name, wallet in state["wallets"].items():
-            action, reason = signal(name, f, dec(wallet["qty"]) > 0, config)
-            stale_bar = now-float(body["closed_at"]) > config["max_signal_age_seconds"]
-            if action == "buy" and (paused or flatten or wallet["halted"] or stale_bar):
-                action, reason = "hold", "New entries blocked: " + (wallet["halted"] or "paused, stopping, or delayed market data") + "."
-            if action == "buy" and (f["spread_bps"] is None or f["spread_bps"] > config["max_spread_bps"]):
-                action, reason = "hold", "Fresh order book with acceptable spread is required."
-            if action != "hold" and not wallet.get("pending"):
-                wallet["pending"] = {"action": action, "at": now, "event_id": event["id"], "reason": reason}
-            decisions.append({"strategy": name, "event_id": event["id"], "at": now, "action": action, "reason": reason, "features": f})
         state["curve"].append({"at": at, **{name: float(w["equity"]) for name, w in state["wallets"].items()}})
         if len(state["curve"]) > 2000:
             state["curve"] = state["curve"][::2]
+    interval = config.get("decision_interval_seconds", 0)
+    continuous = interval and kind in ("book", "flow", "trade", "derivatives", "liquidation", "heatmap") and now-state.get("evaluated_at", -1e20) >= interval
+    if decide and (kind == "candle" or continuous or (interval and kind in ("assessment", "gap"))):
+        evaluate_signals(state, event, config, now, decisions, paused, flatten)
+    for decision in decisions:
+        state.setdefault("latest_signals", {})[decision["strategy"]] = decision
     return decisions, fills
 
 

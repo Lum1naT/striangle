@@ -15,7 +15,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from .configuration import DEFAULTS, fingerprint, validate_config
-from .engine import metrics
+from .engine import MAX_CANDLE_AGE_SECONDS, metrics
 from .models import Candle, Event, Heartbeat, Job, LoginThrottle, Run
 from .markets import ASSETS, MAX_HISTORY_CANDLES, MAX_QUEUED_JOBS, MAX_RESEARCH_CANDLES
 from .research import candidate_configs
@@ -105,31 +105,74 @@ def logout_view(request):
     return JsonResponse({"authenticated": False})
 
 
-def run_summary(run):
+def runtime_status(run, now=None):
+    now = (now or timezone.now()).timestamp()
+    market, runtime = run.state.get("market", {}), run.state.get("runtime", {})
+    book_age = now-market["book_at"] if "book_at" in market else None
+    candle_age = now-market["last_closed_at"] if "last_closed_at" in market else None
+    warmup = len(market.get("closes", []))
+    if run.status not in ("running", "reconciling"):
+        status = run.status
+    elif book_age is None:
+        status = "waiting for live book"
+    elif not 0 <= book_age <= run.config["max_book_age_seconds"]:
+        status = "stale market data"
+    elif warmup < run.config["slow"]:
+        status = "warming indicators"
+    elif candle_age is None or not 0 <= candle_age <= MAX_CANDLE_AGE_SECONDS:
+        status = "waiting for fresh candles"
+    elif run.flatten_requested:
+        status = "closing positions"
+    elif run.entries_paused:
+        status = "entries paused"
+    else:
+        status = "monitoring live data"
+    return {"status": status, "decision_interval_seconds": run.config.get("decision_interval_seconds"),
+        "book_age_seconds": book_age, "candle_age_seconds": candle_age,
+        "processed_at": runtime.get("processed_at"), "processing_delay_seconds": runtime.get("processing_delay_seconds"),
+        "evaluated_at": run.state.get("evaluated_at"), "evaluated_event_id": run.state.get("evaluated_event_id"),
+        "warmup_candles": warmup, "warmup_required": run.config["slow"],
+        "seeded_candles": run.state.get("warmup", {}).get("seeded_candles", 0)}
+
+
+def run_summary(run, now=None):
     values = run.results.get("holdout", {}).get("metrics", {}) if run.mode in ("replay", "candles") else run.results
     return {"id": str(run.id), "name": run.name, "symbol": run.symbol, "mode": run.mode, "status": run.status,
             "config": run.config, "metrics": values, "started_at": run.started_at, "ended_at": run.ended_at,
             "entries_paused": run.entries_paused, "flatten_requested": run.flatten_requested, "error": run.error,
-            "testnet": run.state.get("testnet"), "validation_id": str(run.validation_id) if run.validation_id else None}
+            "testnet": run.state.get("testnet"), "validation_id": str(run.validation_id) if run.validation_id else None,
+            "runtime": runtime_status(run, now) if run.mode in ("paper", "live") else None}
+
+
+def source_statuses(now):
+    sources = []
+    for source in Heartbeat.objects.all():
+        age = (now-source.updated_at).total_seconds()
+        ttl = 600 if source.name in ("ai", "news", "heatmap") else 45
+        sources.append({"name": source.name, "status": source.status if age <= ttl else "stale", "detail": source.detail, "at": source.updated_at, "age_seconds": age})
+    return sources
+
+
+def market_records(symbol):
+    records = {}
+    for kind in ("book", "candle", "flow", "derivatives", "assessment", "heatmap", "liquidation"):
+        # This ordering uses (symbol, kind, received_at), including the fast
+        # empty result for sources which have never been configured.
+        item = Event.objects.filter(symbol=symbol, kind=kind).order_by("-received_at", "-id").first()
+        records[kind] = {"id": item.id, "at": item.received_at, "available_at": item.available_at, "payload": item.payload} if item else None
+    return records
 
 
 @require_GET
 @api
 def dashboard(request):
     now = timezone.now()
-    sources = []
-    for source in Heartbeat.objects.all():
-        age = (now-source.updated_at).total_seconds()
-        ttl = 600 if source.name in ("ai", "news", "heatmap") else 45
-        sources.append({"name": source.name, "status": source.status if age <= ttl else "stale", "detail": source.detail, "at": source.updated_at, "age_seconds": age})
+    sources = source_statuses(now)
     markets = []
     for symbol in settings.SYMBOLS:
-        records = {}
-        for kind in ("book", "candle", "flow", "derivatives", "assessment", "heatmap", "liquidation"):
-            item = Event.objects.filter(symbol=symbol, kind=kind).order_by("id").last()
-            records[kind] = {"id": item.id, "at": item.received_at, "payload": item.payload} if item else None
+        records = market_records(symbol)
         first = Event.objects.filter(symbol=symbol).order_by("id").first()
-        candles = Candle.objects.filter(symbol=symbol)
+        candles = Candle.objects.filter(symbol=symbol, interval="1m")
         first_bar, last_bar = candles.order_by("opened_at").first(), candles.order_by("opened_at").last()
         markets.append({"symbol": symbol, "records": records, "recording_since": first.received_at if first else None,
                         "candles": candles.count(), "candle_start": first_bar.opened_at if first_bar else None,
@@ -142,6 +185,21 @@ def dashboard(request):
         "defaults": DEFAULTS, "ai_configured": bool(settings.OPENAI_API_KEY and settings.OPENAI_MODEL),
         "model": settings.OPENAI_MODEL or None, "live_server_enabled": settings.LIVE_TRADING_ENABLED,
         "execution_environment": "Binance Spot Testnet" if settings.BINANCE_TESTNET else "Binance Spot production"})
+
+
+@require_GET
+@api
+def realtime(request):
+    now = timezone.now()
+    data = {"now": now, "sources": source_statuses(now),
+        "markets": [{"symbol": symbol, "records": market_records(symbol)} for symbol in settings.SYMBOLS],
+        "runs": [run_summary(r, now) for r in Run.objects.filter(owner=request.user).order_by("-created_at")[:50]],
+        "news": [{"id": e.id, "at": e.received_at, **e.payload} for e in Event.objects.filter(kind="news").order_by("-id")[:10]],
+        "cadence": {"dashboard_seconds": 1, "worker_idle_seconds": 0.25, "news_seconds": 120, "ai_seconds": 300}}
+    if request.GET.get("run_id"):
+        run = Run.objects.get(pk=request.GET["run_id"], owner=request.user)
+        data["detail"] = run_detail_data(run)
+    return JsonResponse(data)
 
 
 @require_POST
@@ -221,11 +279,16 @@ def runs(request):
 @api
 def run_detail(request, run_id):
     run = Run.objects.get(pk=run_id, owner=request.user)
-    return JsonResponse({**run_summary(run), "results": run.results, "curve": run.state.get("curve", []),
+    return JsonResponse(run_detail_data(run))
+
+
+def run_detail_data(run):
+    return {**run_summary(run), "results": run.results, "curve": run.state.get("curve", []),
         "wallets": run.state.get("wallets", {}), "last_event_id": run.last_event_id,
+        "latest_signals": run.state.get("latest_signals", {}),
         "decisions": list(run.decisions.order_by("-id").values("strategy", "at", "action", "reason", "features", "event_id")[:100]),
         "fills": list(run.fills.order_by("-id").values("strategy", "at", "side", "quantity", "price", "fee", "pnl", "reason", "details")[:100]),
-        "orders": list(run.orders.order_by("-created_at").values("client_id", "kind", "status", "error", "created_at")[:30])})
+        "orders": list(run.orders.order_by("-created_at").values("client_id", "kind", "status", "error", "created_at")[:30])}
 
 
 @require_POST

@@ -10,6 +10,8 @@ The new `/bots.html` dashboard connects real market recording, chronological bac
 
 BTC, XRP, SOL and ETH have dedicated asset cards. Import up to 1,000,000 real one-minute candles per asset into PostgreSQL, resume interrupted imports, and export the full training dataset as CSV. The default 100,000-candle import can be queued for all four assets at once; chronological research supports 100,000 candles per job.
 
+**Real-time paper operation:** new runs preload already-known, consecutive completed candles for their indicators and check incoming market context every second. Protective exits check every recorded book update. The operations dashboard refreshes prices, portfolio status and current signal reasons every second, shows processing delay, flags stale data, and reconnects automatically. Runs continue in the Render worker when the browser is closed. News is polled every two minutes and optional AI assessments every five minutes; the AI is not called on every tick.
+
 The existing browser chart and optimizer still run independently without a backend. Crypto candles use a public API; forex and commodities require your own Twelve Data API key. The sections below describe that browser research workspace.
 
 ## Use
