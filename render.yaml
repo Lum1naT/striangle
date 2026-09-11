@@ -1,0 +1,105 @@
+projects:
+  - name: striangle
+    environments:
+      - name: production
+        envVarGroups:
+          - name: striangle-runtime
+            envVars:
+              - key: PYTHON_VERSION
+                value: 3.12.14
+              - key: DJANGO_SECRET_KEY
+                generateValue: true
+              - key: DJANGO_DEBUG
+                value: "false"
+              - key: OPENAI_API_KEY
+                sync: false
+              - key: OPENAI_MODEL
+                sync: false
+              - key: AI_DAILY_ATTEMPT_LIMIT
+                value: "600"
+              - key: COINGLASS_API_KEY
+                sync: false
+              - key: LIVE_TRADING_ENABLED
+                value: "false"
+              - key: BINANCE_TESTNET
+                value: "true"
+              - key: LIVE_MAX_CAPITAL
+                value: "0"
+              - key: LIVE_OWNER_ID
+                value: ""
+              - key: LIVE_ACCOUNT_DEDICATED
+                value: "false"
+              - key: LIVE_WITHDRAWALS_DISABLED_CONFIRMED
+                value: "false"
+        databases:
+          - name: striangle-db
+            region: frankfurt
+            plan: basic-256mb
+            databaseName: striangle
+            user: striangle
+            ipAllowList: []
+        services:
+          - type: web
+            name: striangle-web
+            runtime: python
+            region: frankfurt
+            plan: starter
+            buildCommand: pip install -r backend/requirements.lock.txt && python backend/manage.py collectstatic --noinput
+            preDeployCommand: python backend/manage.py migrate --noinput
+            startCommand: gunicorn --chdir backend config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 60 --access-logfile -
+            healthCheckPath: /healthz/
+            autoDeployTrigger: checksPass
+            envVars:
+              - fromGroup: striangle-runtime
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: striangle-db
+                  property: connectionString
+          - type: worker
+            name: striangle-recorder
+            runtime: python
+            region: frankfurt
+            plan: starter
+            numInstances: 1
+            buildCommand: pip install -r backend/requirements.lock.txt
+            startCommand: python backend/manage.py wait_for_database && python backend/manage.py record_market
+            maxShutdownDelaySeconds: 60
+            autoDeployTrigger: checksPass
+            envVars:
+              - fromGroup: striangle-runtime
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: striangle-db
+                  property: connectionString
+          - type: worker
+            name: striangle-trader
+            runtime: python
+            region: frankfurt
+            plan: starter
+            numInstances: 1
+            buildCommand: pip install -r backend/requirements.lock.txt
+            startCommand: python backend/manage.py wait_for_database && python backend/manage.py bot_worker
+            maxShutdownDelaySeconds: 60
+            autoDeployTrigger: checksPass
+            envVars:
+              - fromGroup: striangle-runtime
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: striangle-db
+                  property: connectionString
+          - type: worker
+            name: striangle-research
+            runtime: python
+            region: frankfurt
+            plan: starter
+            numInstances: 1
+            buildCommand: pip install -r backend/requirements.lock.txt
+            startCommand: python backend/manage.py wait_for_database && python backend/manage.py research_worker
+            maxShutdownDelaySeconds: 300
+            autoDeployTrigger: checksPass
+            envVars:
+              - fromGroup: striangle-runtime
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: striangle-db
+                  property: connectionString

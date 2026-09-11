@@ -1,0 +1,120 @@
+import assert from 'node:assert/strict';
+import {spawn, spawnSync} from 'node:child_process';
+import {mkdtempSync, mkdirSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {setTimeout as delay} from 'node:timers/promises';
+import {chromium} from 'playwright';
+
+// The fixture account exists only in a new temporary database. No collectors,
+// research workers, API keys or live orders are used by this browser test.
+const root = fileURLToPath(new URL('../', import.meta.url));
+const temp = mkdtempSync(join(tmpdir(), 'striangle-ui-'));
+const results = join(root, 'test-results');
+mkdirSync(results, {recursive: true});
+const python = process.env.PYTHON || 'python';
+const baseURL = 'http://127.0.0.1:8765';
+const env = {...process.env, DJANGO_DEBUG: 'true', DJANGO_SSL_REDIRECT: 'false',
+  DJANGO_ALLOWED_HOSTS: '127.0.0.1,localhost', DATABASE_URL: `sqlite:///${join(temp, 'db.sqlite3')}`,
+  OPENAI_API_KEY: '', OPENAI_MODEL: '', COINGLASS_API_KEY: '', BINANCE_API_KEY: '',
+  BINANCE_API_SECRET: '', LIVE_TRADING_ENABLED: 'false', LIVE_MAX_CAPITAL: '0',
+  LIVE_OWNER_ID: '', LIVE_ACCOUNT_DEDICATED: 'false', BINANCE_TESTNET: 'true'};
+function manage(...args) {
+  const result = spawnSync(python, [join(root, 'backend/manage.py'), ...args], {cwd: root, env, encoding: 'utf8', timeout: 30000});
+  assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout);
+}
+
+let server, browser, page, logs = '';
+const errors = [];
+async function screenshot(name) { await page.screenshot({path: join(results, `${name}.png`), fullPage: true}); }
+async function assertFits() {
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Dashboard overflows the viewport');
+}
+try {
+  manage('migrate', '--noinput');
+  manage('shell', '-c', "from django.contrib.auth import get_user_model; get_user_model().objects.create_user('ui-fixture', password='local-ui-fixture-password')");
+  server = spawn(python, [join(root, 'backend/manage.py'), 'runserver', '127.0.0.1:8765', '--noreload'], {cwd: root, env, stdio: ['ignore', 'pipe', 'pipe']});
+  server.stdout.on('data', data => { logs += data; });
+  server.stderr.on('data', data => { logs += data; });
+  server.on('error', error => { logs += error.message; });
+  let healthy = false;
+  for (let i = 0; i < 100; i++) {
+    try { healthy = (await fetch(`${baseURL}/healthz/`, {signal: AbortSignal.timeout(500)})).ok; } catch {}
+    if (healthy) break;
+    await delay(100);
+  }
+  assert(healthy, `Django did not become healthy: ${logs}`);
+  browser = await chromium.launch({headless: true});
+  page = await browser.newPage({viewport: {width: 1440, height: 1000}});
+  page.setDefaultTimeout(15000);
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(`${baseURL}/bots.html`);
+  await page.locator('#authPanel').waitFor({state: 'visible'});
+  assert.equal(await page.locator('#workspace').isVisible(), false);
+  await page.locator('#username').fill('ui-fixture');
+  await page.locator('#password').fill('local-ui-fixture-password');
+  await page.locator('#loginForm button').click();
+  await page.locator('#sourceStatuses .source-status').first().waitFor();
+  assert.equal(await page.locator('#sourceStatuses .source-status').count(), 7);
+  assert.equal(await page.locator('#marketPrice').textContent(), '—');
+  assert.match(await page.locator('#aiTitle').textContent(), /not configured/);
+  await assertFits();
+  await screenshot('dashboard-desktop');
+
+  await page.locator('[data-section="researchPanel"]').click();
+  assert.equal(await page.locator('#cfg_capital').inputValue(), '10000');
+  assert.equal(await page.locator('#researchPanel').isVisible(), true);
+  await page.locator('[data-section="paperPanel"]').click();
+  const created = page.waitForResponse(response => response.url() === `${baseURL}/api/runs/` && response.request().method() === 'POST');
+  await page.locator('#startPaper').click();
+  const response = await created;
+  assert.equal(response.status(), 201, await response.text());
+  const run = await response.json();
+  await page.locator('#runInspector').waitFor({state: 'visible'});
+  assert.equal(await page.locator('#comparisonMetrics .comparison-card').count(), 3);
+  assert.match(await page.locator('#decisionJournal').textContent(), /Waiting for a completed candle/);
+  await page.getByRole('button', {name: 'Pause entries', exact: true}).click();
+  await page.getByRole('button', {name: 'Resume entries', exact: true}).waitFor();
+  await screenshot('paper-desktop');
+  await page.getByRole('button', {name: 'Flatten & stop', exact: true}).click();
+  await page.locator('#runControls').getByText('Closing positions', {exact: false}).waitFor();
+  manage('bot_worker', '--once');
+  const detail = await (await page.request.get(`${baseURL}/api/runs/${run.id}/`)).json();
+  assert.equal(detail.status, 'stopped');
+  assert.equal(detail.fills.length, 0);
+  assert.equal(detail.orders.length, 0);
+  await page.locator('#closeInspector').click();
+
+  await page.locator('[data-section="livePanel"]').click();
+  await page.locator('#checkReadiness').click();
+  await page.locator('#readinessChecks .readiness-check').first().waitFor();
+  const report = await (await page.request.get(`${baseURL}/api/runs/${run.id}/readiness/`)).json();
+  assert.equal(report.eligible, false);
+  assert(report.checks.some(check => check.label === 'Operator enablement' && !check.passed));
+  await page.setViewportSize({width: 390, height: 844});
+  await assertFits();
+  await screenshot('readiness-mobile');
+  for (const section of ['dataPanel', 'researchPanel', 'paperPanel']) {
+    await page.locator(`[data-section="${section}"]`).click();
+    await assertFits();
+  }
+  await screenshot('paper-mobile');
+  await page.locator('#logout').click();
+  await page.locator('#authPanel').waitFor({state: 'visible'});
+  assert.equal((await page.request.get(`${baseURL}/api/dashboard/`)).status(), 401);
+  assert.deepEqual(errors, [], 'Browser runtime errors');
+  console.log('Browser checks passed: authentication, dashboard, experiment settings, paper controls, readiness, mobile layout and logout.');
+} catch (error) {
+  if (page) await screenshot('failure').catch(() => {});
+  throw error;
+} finally {
+  writeFileSync(join(results, 'django.log'), logs);
+  if (browser) await browser.close();
+  if (server && server.exitCode === null) {
+    server.kill('SIGTERM');
+    await Promise.race([new Promise(done => server.once('exit', done)), delay(3000)]);
+    if (server.exitCode === null) server.kill('SIGKILL');
+  }
+  rmSync(temp, {recursive: true, force: true});
+}

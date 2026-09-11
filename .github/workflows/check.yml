@@ -14,3 +14,55 @@ jobs:
           node-version: '22'
       - run: npm run check
       - run: npm test
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: striangle
+          POSTGRES_USER: striangle
+          POSTGRES_PASSWORD: ci-fixture-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_DEBUG: "true"
+      DATABASE_URL: postgres://striangle:ci-fixture-only@127.0.0.1:5432/striangle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock.txt
+      - run: pip install -r backend/requirements.lock.txt
+      - run: python backend/manage.py collectstatic --noinput
+      - run: python backend/manage.py makemigrations --check --dry-run
+      - run: python backend/manage.py test trading.tests
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.lock.txt
+      - run: pip install -r backend/requirements.lock.txt
+      - run: npm install --no-save --package-lock=false playwright@1.62.1
+      - run: npx playwright install --with-deps chromium
+      - run: node tests/bot-ui.e2e.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dashboard-browser-checks
+          path: test-results/

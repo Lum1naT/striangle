@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101319"><meta name="description" content="Record markets, compare strategies and follow every Striangle trading decision.">
+  <title>Striangle — Trading operations</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./style.css"><link rel="stylesheet" href="./bots.css">
+</head>
+<body class="bot-page">
+  <header>
+    <a class="brand" href="./"><span class="brandmark">S</span>Stri<span>angle</span></a>
+    <nav aria-label="Workspace"><a href="./">Chart & optimizer</a><a href="./bots.html" aria-current="page">Trading operations</a></nav>
+    <div class="header-actions"><span id="accountName" class="muted"></span><button id="logout" hidden>Sign out</button></div>
+  </header>
+  <div id="globalStatus" class="notice" role="status" aria-live="polite">Connecting to your workspace…</div>
+  <main class="bot-main">
+    <section id="authPanel" class="auth-panel" hidden>
+      <span class="eyebrow">YOUR RESEARCH, CONNECTED</span><h1>Sign in to Striangle.</h1>
+      <p>Keep market recordings, strategy evidence and trading decisions in one place.</p>
+      <form id="loginForm"><label>Username<input id="username" autocomplete="username" required maxlength="150"></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+        <button class="primary" type="submit">Sign in</button></form>
+      <p class="muted small">Accounts are created by your workspace administrator.</p>
+    </section>
+    <div id="workspace" hidden>
+      <section class="bot-heading"><div><span class="eyebrow">TRADING OPERATIONS</span><h1>From signal to evidence.</h1><p>Every observation recorded. Every decision explained.</p></div>
+        <div class="heading-controls"><span id="executionBadge" class="mode-badge">Paper trading</span><label>Market<select id="botSymbol"><option value="BTCUSDT">BTC / USDT</option><option value="ETHUSDT">ETH / USDT</option></select></label></div>
+      </section>
+      <nav class="stage-nav" aria-label="Development stages">
+        <button class="selected" data-section="dataPanel"><span>01</span> Record markets</button>
+        <button data-section="researchPanel"><span>02</span> Test strategies</button>
+        <button data-section="paperPanel"><span>03</span> Paper trading</button>
+        <button data-section="livePanel"><span>04</span> Live readiness</button>
+      </nav>
+      <div class="status-grid" id="sourceStatuses" aria-label="Data and worker health"></div>
+      <section id="dataPanel" class="operation-section">
+        <div class="data-grid">
+          <article class="panel book-panel"><div class="panel-top"><div><span class="eyebrow">BINANCE SPOT · TOP 20 LEVELS</span><h2 id="bookSymbol">BTC / USDT</h2></div><a id="exportEvents" class="button-link" href="/api/events/?symbol=BTCUSDT">Export events</a></div>
+            <div class="live-price"><strong id="marketPrice">—</strong><span id="bookFreshness">Waiting for recorded observations</span></div>
+            <div class="book-table"><table><caption>Visible order-book depth</caption><thead><tr><th>Bid size</th><th>Bid price</th><th>Ask price</th><th>Ask size</th></tr></thead><tbody id="bookRows"></tbody></table></div>
+            <div class="mini-metrics"><div><span>Spread</span><strong id="spreadValue">—</strong></div><div><span>Recorded since</span><strong id="recordingSince">—</strong></div><div><span>Completed candles</span><strong id="candleCount">0</strong></div></div>
+          </article>
+          <article class="panel"><span class="eyebrow">POSITIONING CONTEXT · BYBIT DERIVATIVES</span><h2>Pressure beneath the price.</h2>
+            <dl class="context-values"><div><dt>Funding rate</dt><dd id="fundingValue">—</dd></div><div><dt>Open interest</dt><dd id="oiValue">—</dd></div><div><dt>Last observed liquidation</dt><dd id="liquidationValue">—</dd></div><div><dt>Estimated liquidation heatmap</dt><dd id="heatmapValue">Not configured</dd></div></dl>
+            <p class="muted small">Derivatives data is context for spot trading. Liquidation event values use the reported bankruptcy price. Heatmaps estimate concentrations of vulnerable positions.</p>
+          </article>
+          <article class="panel"><div class="panel-top"><div><span class="eyebrow">AI NEWS CONTEXT</span><h2 id="aiTitle">Awaiting an assessment.</h2></div><span id="newsScore" class="score">—</span></div>
+            <p id="aiSummary">A configured model and fresh, recorded news are required.</p><p id="aiAt" class="muted small"></p><div id="aiSources" class="source-links"></div>
+            <p class="muted small">The −1 to +1 score describes news direction. It is not a probability of a profitable trade.</p>
+          </article>
+          <article class="panel"><span class="eyebrow">RECENT NEWS</span><h2>What the model can see.</h2><div id="newsItems" class="news-items"><p class="empty">No news recorded yet.</p></div></article>
+        </div>
+      </section>
+      <section id="researchPanel" class="operation-section" hidden>
+        <div class="research-layout"><article class="panel"><span class="eyebrow">HISTORICAL RESEARCH</span><h2>Test the hypothesis.</h2>
+          <form id="historyForm" class="history-form"><label>Import real 1-minute candles<select id="historyCount"><option value="1000">1,000 candles</option><option value="5000">5,000 candles</option></select></label><button type="submit">Fetch history</button></form>
+          <form id="researchForm"><div class="fields"><label>Data source<select id="researchMode"><option value="candles">Historical candles</option><option value="replay">Recorded event replay</option></select></label><label>Select parameters for<select id="selectionStrategy"><option value="trend">Trend baseline</option><option value="rsi">RSI baseline</option><option value="ai_trend">AI-assisted trend</option></select></label></div>
+            <div class="fields"><label>Start, UTC<input id="researchStart" type="datetime-local" required></label><label>End, UTC<input id="researchEnd" type="datetime-local" required></label></div>
+            <div class="fields"><label>Fast SMA candidates<input id="fastGrid" value="5,10" required></label><label>Slow SMA candidates<input id="slowGrid" value="20,30" required></label></div>
+            <p class="muted small" id="researchMethod">First 70% selects parameters. The selected configuration is evaluated once on the final 30%, with a fresh portfolio.</p>
+            <button class="primary" type="submit">Run chronological research</button>
+          </form>
+          <div id="jobList" class="job-list" aria-live="polite"></div>
+        </article>
+        <article class="panel settings-panel"><span class="eyebrow">SHARED EXPERIMENT SETTINGS</span><h2>Define the risk.</h2><p class="muted small">These settings apply to new research and paper experiments. Active runs keep their original settings.</p><form id="riskForm"><div id="riskFields" class="fields"></div></form></article></div>
+        <article class="panel"><span class="eyebrow">COMPLETED RESEARCH</span><h2>Training chooses. Holdout evaluates.</h2><div id="researchRuns" class="run-list"></div></article>
+      </section>
+      <section id="paperPanel" class="operation-section" hidden>
+        <article class="panel start-paper"><div><span class="eyebrow">FORWARD COMPARISON</span><h2>Same market. Three independent portfolios.</h2><p>Trend, RSI and AI-assisted trend each start with the same virtual capital and cost assumptions.</p><p id="validationNote" class="muted small">Uses the current experiment settings. No research run linked.</p></div><button id="startPaper" class="primary">Start paper experiment</button></article>
+        <p class="muted small">Strategies warm up on consecutive completed 1-minute candles. The AI portfolio waits when required context is missing. Pausing prevents new entries; protective exits continue.</p>
+        <div id="paperRuns" class="run-list"></div>
+      </section>
+      <section id="livePanel" class="operation-section" hidden>
+        <article class="panel"><span class="eyebrow">CONTROLLED ACTIVATION</span><h2>Evidence before live capital.</h2><p>Review a completed paper experiment against the minimum operating requirements.</p>
+          <div class="readiness-controls"><label>Paper experiment<select id="readinessRun"></select></label><button id="checkReadiness">Review readiness</button></div><div id="readinessChecks"><p class="empty">Choose a paper experiment to review its evidence.</p></div>
+          <p class="muted small">Passing these checks does not prove future profitability. Live activation requires the server operator to configure a dedicated exchange account, set its capital cap and explicitly arm the evaluated experiment.</p>
+        </article><div id="liveRuns" class="run-list"></div>
+      </section>
+      <section id="runInspector" class="panel inspector" hidden>
+        <div class="panel-top"><div><span class="eyebrow">EXPERIMENT DETAIL</span><h2 id="inspectorTitle"></h2></div><button id="closeInspector" aria-label="Close experiment details">Close</button></div>
+        <p id="inspectorStatus" class="muted"></p><div id="runControls" class="run-controls"></div>
+        <div id="comparisonMetrics" class="comparison-grid"></div>
+        <div class="curve-heading"><h3>Portfolio equity · USDT</h3><span>Trend <i class="legend-dot trend"></i> RSI <i class="legend-dot rsi"></i> AI <i class="legend-dot ai"></i></span></div>
+        <canvas id="portfolioCurve" role="img" aria-label="Portfolio equity over time. Exact final values are shown in the comparison cards."></canvas>
+        <div id="researchDetails" hidden></div>
+        <h3>Decision journal</h3><div id="decisionJournal" class="decision-journal"></div>
+        <div class="panel-top"><h3>Execution ledger</h3><a id="exportFills" class="button-link">Export fills</a></div>
+        <div class="table-scroll"><table><thead><tr><th>Time, UTC</th><th>Strategy</th><th>Side</th><th>Quantity</th><th>Price</th><th>Fee, USDT</th><th>Realized P&amp;L</th><th>Reason</th></tr></thead><tbody id="fillRows"></tbody></table></div>
+        <div id="orderJournal"></div>
+      </section>
+    </div>
+  </main>
+  <footer><span>STRIANGLE <span class="separator">/</span> Research before risk.</span><span>Recorded context. Measurable assumptions.</span></footer>
+  <script type="module" src="./bots.mjs"></script>
+</body>
+</html>

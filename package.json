@@ -6,7 +6,7 @@
   "description": "Trading-inspired charting and strategy backtesting PWA",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check dist/app.mjs && node --check dist/engine.mjs && node --check dist/sw.js && node --check dist/market-data.mjs && node --check dist/optimizer.mjs && node --check dist/optimizer-worker.mjs",
+    "check": "node --check dist/app.mjs && node --check dist/engine.mjs && node --check dist/sw.js && node --check dist/market-data.mjs && node --check dist/optimizer.mjs && node --check dist/optimizer-worker.mjs && node --check dist/bots.mjs",
     "start": "python3 -m http.server 8080 --directory dist"
   }
 }

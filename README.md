@@ -1,6 +1,14 @@
 # Striangle
 
-An independent TradingView-inspired strategy research workspace, implemented as a static, installable web app. Not affiliated with TradingView. No build dependencies or backend required. Crypto uses a public API; forex and commodities require your own Twelve Data API key.
+An independent TradingView-inspired strategy research workspace with an installable browser chart and a Django-powered trading operations dashboard. Not affiliated with TradingView.
+
+## Trading operations
+
+The new `/bots.html` dashboard connects real market recording, chronological backtests, paired forward paper trading and explicitly gated Binance spot execution. It includes session authentication, PostgreSQL persistence, structured AI news assessments, decision/fill journals and Render configuration. Live execution defaults off.
+
+**[Setup, architecture, data coverage, operating limits and live activation](docs/trading-system.md)**
+
+The existing browser chart and optimizer still run independently without a backend. Crypto candles use a public API; forex and commodities require your own Twelve Data API key. The sections below describe that browser research workspace.
 
 ## Use
 
@@ -25,7 +33,7 @@ Long only, one position, no leverage, no shorting. Signals are evaluated after c
 
 Equity is marked at candle close before hypothetical liquidation costs, with actual fees charged on execution. Drawdown is based on these marks and therefore excludes intrabar losses. Buy-and-hold is gross price change, with no fees, and is not a capital-matched alternative simulation. Results omit spread variation, market impact, liquidity constraints, funding, corporate actions, borrow fees and taxes. Historical results do not predict future returns.
 
-## Scope
+## Browser chart scope
 
 This is a functional first version, not feature parity with TradingView. No Pine Script interpreter, arbitrary code execution, streaming tick feed, broker integration, chart drawing tools, cloud sync, or walk-forward framework. Strategies use one entry comparison and one exit comparison plus risk exits. One strategy save slot is available in local storage. Data remains on the user's browser; clearing browser data removes saved work.
 
