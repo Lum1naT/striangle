@@ -44,7 +44,7 @@ projects:
             region: frankfurt
             plan: starter
             buildCommand: pip install -r backend/requirements.lock.txt && python backend/manage.py collectstatic --noinput
-            preDeployCommand: python backend/manage.py migrate --noinput
+            preDeployCommand: python backend/manage.py wait_for_database --connection-only && python backend/manage.py migrate --noinput
             startCommand: gunicorn --chdir backend config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 60 --access-logfile -
             healthCheckPath: /healthz/
             autoDeployTrigger: checksPass
