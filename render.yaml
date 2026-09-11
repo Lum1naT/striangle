@@ -4,6 +4,9 @@ projects:
       - name: production
         envVarGroups:
           - name: striangle-runtime
+            # Add optional OPENAI_API_KEY, OPENAI_MODEL and COINGLASS_API_KEY
+            # to this group in Render after creation. sync: false is ignored
+            # inside environment groups.
             envVars:
               - key: PYTHON_VERSION
                 value: 3.12.14
@@ -11,14 +14,8 @@ projects:
                 generateValue: true
               - key: DJANGO_DEBUG
                 value: "false"
-              - key: OPENAI_API_KEY
-                sync: false
-              - key: OPENAI_MODEL
-                sync: false
               - key: AI_DAILY_ATTEMPT_LIMIT
                 value: "600"
-              - key: COINGLASS_API_KEY
-                sync: false
               - key: LIVE_TRADING_ENABLED
                 value: "false"
               - key: BINANCE_TESTNET
@@ -35,6 +32,8 @@ projects:
           - name: striangle-db
             region: frankfurt
             plan: basic-256mb
+            postgresMajorVersion: "17"
+            diskSizeGB: 15
             databaseName: striangle
             user: striangle
             ipAllowList: []
