@@ -1,5 +1,8 @@
 export function setupAutonomy({$, element, fmt, when, api, busy, message, refresh}) {
-  let current, latestStatus, configKey = '', reportKey = '', recordsKey = '';
+  let current, latestStatus, controlAllowed = false, runNowBusy = false, configKey = '', reportKey = '', recordsKey = '';
+  function updateRunNow() {
+    $('autoRunNow').disabled = runNowBusy || !controlAllowed || !current?.enabled || ['queued', 'training', 'ready'].includes(latestStatus);
+  }
   const fields = [
     ['capital', 'Virtual capital per challenger, USDT', 10, 10000000, 1],
     ['allocation_pct', 'Maximum cash committed to margin and entry fee, %', .1, 100, .1],
@@ -26,10 +29,17 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
     await api('autonomy/control/', {enabled: false}); await refresh();
     message('Automatic research stopped. Open paper positions will close on fresh futures books.');
   });
-  $('autoRunNow').onclick = () => busy($('autoRunNow'), async () => {
-    await api('autonomy/control/', {enabled: true, run_now: true}); await refresh();
-    message('Search queued with saved settings. The current paper cycle will flatten when the new search is ready.');
-  });
+  $('autoRunNow').onclick = async () => {
+    if ($('autoRunNow').disabled || runNowBusy) return;
+    runNowBusy = true; updateRunNow();
+    try {
+      const result = await api('autonomy/control/', {enabled: true, run_now: true});
+      latestStatus = result.latest?.status;
+      await refresh();
+      message('Search queued with saved settings. The current paper cycle will flatten when the new search is ready.');
+    } catch (error) { message(error.message, true); }
+    finally { runNowBusy = false; updateRunNow(); }
+  };
   function table(headers, rows, caption) {
     const t = element('table'), head = element('thead'), tr = element('tr'), body = element('tbody');
     if (caption) t.append(element('caption', caption));
@@ -41,6 +51,7 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
   return function render(data, canControl, full) {
     if (!data) return;
     current = data;
+    controlAllowed = canControl;
     if (full) latestStatus = data.latest?.status;
     $('autoStatus').textContent = `${data.enabled ? 'Enabled' : 'Stopped'} · ${data.status}${data.next_run_at && data.enabled ? ` · Next scheduled check ${when(data.next_run_at)} UTC` : ''}`;
     const key = JSON.stringify([data.config, canControl]);
@@ -52,7 +63,7 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
       $('autoEnable').disabled = !canControl;
     }
     $('autoStop').disabled = !canControl || !data.enabled;
-    $('autoRunNow').disabled = !canControl || !data.enabled || ['queued', 'training', 'ready'].includes(latestStatus);
+    updateRunNow();
     $('autoEnable').textContent = data.enabled ? 'Save automatic settings' : 'Enable automatic research';
     $('autoControlNote').textContent = canControl ? 'These controls manage the shared paper research service for this workspace.' : 'A workspace administrator manages automatic research. You can inspect all results here.';
     const cycle = data.cycle;
