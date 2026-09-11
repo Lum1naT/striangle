@@ -29,7 +29,11 @@ let server, browser, page, logs = '';
 const errors = [];
 async function screenshot(name) { await page.screenshot({path: join(results, `${name}.png`), fullPage: true}); }
 async function assertFits() {
-  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Dashboard overflows the viewport');
+  const layout = await page.evaluate(() => ({width: innerWidth, content: document.documentElement.scrollWidth,
+    overflow: [...document.querySelectorAll('body *')].filter(node => {
+      const rect = node.getBoundingClientRect(); return rect.width > 0 && rect.right > innerWidth + 1;
+    }).slice(0, 10).map(node => ({tag: node.tagName, id: node.id, class: node.className}))}));
+  assert(layout.content <= layout.width + 1, `Dashboard overflows the viewport: ${JSON.stringify(layout)}`);
 }
 try {
   manage('migrate', '--noinput');
@@ -98,8 +102,8 @@ try {
   for (const section of ['dataPanel', 'researchPanel', 'paperPanel']) {
     await page.locator(`[data-section="${section}"]`).click();
     await assertFits();
+    await screenshot(`${section}-mobile`);
   }
-  await screenshot('paper-mobile');
   await page.locator('#logout').click();
   await page.locator('#authPanel').waitFor({state: 'visible'});
   assert.equal((await page.request.get(`${baseURL}/api/dashboard/`)).status(), 401);

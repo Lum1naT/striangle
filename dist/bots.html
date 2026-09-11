@@ -56,7 +56,7 @@
         <div class="research-layout"><article class="panel"><span class="eyebrow">HISTORICAL RESEARCH</span><h2>Test the hypothesis.</h2>
           <form id="historyForm" class="history-form"><label>Import real 1-minute candles<select id="historyCount"><option value="1000">1,000 candles</option><option value="5000">5,000 candles</option></select></label><button type="submit">Fetch history</button></form>
           <form id="researchForm"><div class="fields"><label>Data source<select id="researchMode"><option value="candles">Historical candles</option><option value="replay">Recorded event replay</option></select></label><label>Select parameters for<select id="selectionStrategy"><option value="trend">Trend baseline</option><option value="rsi">RSI baseline</option><option value="ai_trend">AI-assisted trend</option></select></label></div>
-            <div class="fields"><label>Start, UTC<input id="researchStart" type="datetime-local" required></label><label>End, UTC<input id="researchEnd" type="datetime-local" required></label></div>
+            <div class="fields date-fields"><label>Start, UTC<input id="researchStart" type="datetime-local" required></label><label>End, UTC<input id="researchEnd" type="datetime-local" required></label></div>
             <div class="fields"><label>Fast SMA candidates<input id="fastGrid" value="5,10" required></label><label>Slow SMA candidates<input id="slowGrid" value="20,30" required></label></div>
             <p class="muted small" id="researchMethod">First 70% selects parameters. The selected configuration is evaluated once on the final 30%, with a fresh portfolio.</p>
             <button class="primary" type="submit">Run chronological research</button>
