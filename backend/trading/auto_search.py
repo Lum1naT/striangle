@@ -3,7 +3,8 @@ import hashlib
 import json
 import warnings
 
-from .auto_config import AUTO_VERSION, margin_config
+from .auto_config import AUTO_VERSION, candidate_config, margin_config
+from .auto_rules import evaluate, model_keys
 from .auto_signals import strategies
 from .margin import accrue_funding, close_position, entry_quantity, liquidatable, mark, metrics, new_wallet, open_position
 from .ml import FEATURE_NAMES, FEATURE_VERSION, MODEL_VERSION, feature_vector
@@ -20,7 +21,7 @@ def price_features(bars):
     return vectors
 
 
-def fit_predictors(bars, config, selection_start, test_start):
+def fit_predictors(bars, config, fitting_end):
     import numpy as np
     import sklearn
     from sklearn.exceptions import ConvergenceWarning
@@ -34,6 +35,7 @@ def fit_predictors(bars, config, selection_start, test_start):
     valid = np.isfinite(x).all(axis=1)
     times = np.asarray([b["opened_at"] for b in bars])
     opens = np.asarray([b["open"] for b in bars])
+    tuning_start = (times[0]+(fitting_end-times[0])*.75)//60*60
     fee, slip, half = config["fee_bps"]/10000, config["slippage_bps"]/10000, config["spread_bps"]/20000
     artifacts, predictions, reports = {}, {}, {}
     for horizon in (15, 60):
@@ -41,9 +43,10 @@ def fit_predictors(bars, config, selection_start, test_start):
         indices = np.arange(n)
         label_end = times[indices+horizon+1]
         known = valid[:n] & (label_end-times[:n] == (horizon+1)*60)
-        train = known & (label_end < selection_start)
-        validation = known & (times[:n]+60 >= selection_start) & (label_end < test_start)
-        if min(int(train.sum()), int(validation.sum())) < 500:
+        train = known & (label_end < tuning_start)
+        validation = known & (times[:n]+60 >= tuning_start) & (label_end < fitting_end)
+        refit = known & (label_end < fitting_end)
+        if int(train.sum()) < 500 or int(validation.sum()) < 200:
             raise ValueError("Not enough consecutive data for purged training and validation")
         with threadpool_limits(limits=1), warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
@@ -66,30 +69,41 @@ def fit_predictors(bars, config, selection_start, test_start):
                     ranked.append((loss, strength, fitted))
                 ranked.sort(key=lambda item: (item[0], item[1]))
                 loss, strength, model = ranked[0]
+                # C is fixed before any strategy-search outcome. Refit the
+                # selected classifier/scaler on the complete earlier window.
+                final_scaler = StandardScaler().fit(x[:n][refit])
+                final_scaled = final_scaler.transform(np.nan_to_num(x))
+                model = LogisticRegression(C=strength, l1_ratio=0, solver="lbfgs", max_iter=500, tol=1e-7).fit(final_scaled[:n][refit], y[refit])
                 key = f"{horizon}:{side}"
                 artifact = {"algorithm": MODEL_VERSION, "feature_version": FEATURE_VERSION, "features": FEATURE_NAMES,
-                    "mean": scaler.mean_.tolist(), "scale": scaler.scale_.tolist(), "weights": model.coef_[0].tolist(),
+                    "mean": final_scaler.mean_.tolist(), "scale": final_scaler.scale_.tolist(), "weights": model.coef_[0].tolist(),
                     "intercept": float(model.intercept_[0]), "C": strength, "threshold": .55,
                     "horizon_minutes": horizon, "direction": side, "sklearn_version": sklearn.__version__, "auto_version": AUTO_VERSION}
                 artifact["version"] = hashlib.sha256(json.dumps(artifact, sort_keys=True).encode()).hexdigest()
                 artifacts[key] = artifact
-                predictions[key] = np.where(valid, model.predict_proba(scaled)[:, 1], -1).tolist()
-                reports[key] = {"train_samples": int(train.sum()), "validation_samples": int(validation.sum()),
-                    "last_training_label": float(label_end[train][-1]), "last_validation_label": float(label_end[validation][-1]),
+                predictions[key] = np.where(valid, model.predict_proba(final_scaled)[:, 1], -1).tolist()
+                reports[key] = {"train_samples": int(refit.sum()), "c_training_samples": int(train.sum()), "validation_samples": int(validation.sum()),
+                    "tuning_start": float(tuning_start), "fitting_end": fitting_end,
+                    "last_training_label": float(label_end[refit][-1]), "last_validation_label": float(label_end[validation][-1]),
                     "C": strength, "validation_log_loss": loss,
                     "candidates": [{"C": c, "validation_log_loss": score} for score, c, _ in ranked]}
     return artifacts, predictions, reports, vectors
 
 
-def signal_series(bars, candidate, predictions, vectors):
+def signal_series(bars, candidate, predictions, vectors, *, start=None, end=None):
     # Precompute once per strategy, then share across all tested leverage levels.
     entries, exits_long, exits_short = [], [], []
     closes = [b["close"] for b in bars]
     for i, values in enumerate(vectors):
         side, exit_long, exit_short = 0, False, False
-        if values is not None:
+        in_window = (start is None or bars[i]["opened_at"] >= start) and (end is None or bars[i]["closed_at"] <= end)
+        if values is not None and in_window:
             family = candidate["family"]
-            if family == "ml":
+            if family == "combination":
+                p = predictions[candidate["model_key"]][i] if model_keys(candidate) else None
+                rule = evaluate(candidate, closes[max(0, i-60):i+1], values, p)
+                side, exit_long, exit_short = rule["enter"], rule["exit_long"], rule["exit_short"]
+            elif family == "ml":
                 side = candidate["side"] if predictions[candidate["model_key"]][i] >= candidate["threshold"] else 0
             elif family == "trend":
                 fast, slow = candidate["fast"], candidate["slow"]
@@ -98,9 +112,11 @@ def signal_series(bars, candidate, predictions, vectors):
             elif family == "rsi":
                 rsi = (values[-1]+1)*50
                 side, exit_long, exit_short = (1 if rsi <= 30 else -1 if rsi >= 70 else 0), rsi >= 50, rsi <= 50
-            else:
+            elif family == "breakout":
                 side = 1 if closes[i] > max(closes[i-20:i]) else -1 if closes[i] < min(closes[i-20:i]) else 0
-            if family != "rsi":
+            else:
+                raise ValueError("Unsupported strategy family")
+            if family not in ("rsi", "combination"):
                 exit_long, exit_short = side == -1, side == 1
         entries.append(side); exits_long.append(exit_long); exits_short.append(exit_short)
     return entries, exits_long, exits_short
@@ -108,6 +124,7 @@ def signal_series(bars, candidate, predictions, vectors):
 
 def backtest(bars, signals, candidate, cfg, start, end):
     """Spot/futures candle price proxy, next-open fills, conservative liquidation."""
+    cfg = candidate_config(cfg, candidate)
     wallet = new_wallet(cfg["capital"])
     pending, previous, last_bar = 0, None, None
     half, slip = cfg["spread_bps"]/20000, cfg["slippage_bps"]/10000
@@ -172,16 +189,27 @@ def rank_candidates(rows, minimum_trades, max_drawdown):
 
 
 def search_asset(symbol, bars, policy, selection_start, test_start, progress=lambda text: None, stop=None):
+    from .strategy_optimizer import optimize
     cfg = margin_config(policy)
-    artifacts, predictions, fitting, vectors = fit_predictors(bars, cfg, selection_start, test_start)
+    # Exclude the final period even from feature/prediction construction. The
+    # first 60% is itself split into fitting (40%) and adaptive search (20%).
+    bars = [b for b in bars if b["closed_at"] <= test_start]
+    search_start = (bars[0]["opened_at"]+(selection_start-bars[0]["opened_at"])*2/3)//60*60
+    artifacts, predictions, fitting, vectors = fit_predictors(bars, cfg, search_start)
+    finalists, optimization = optimize(symbol, bars, cfg, predictions, vectors, search_start, selection_start,
+        policy["min_validation_trades"], progress, stop)
+    fitting = {"models": fitting, "optimization": optimization}
     rows = []
-    for candidate in strategies():
+    candidates = [(c | {"leverage": lev}, "baseline") for c in strategies() for lev in range(1, policy["max_leverage"]+1)]
+    candidates.extend((c, "scikit_search") for c in finalists)
+    cached_id, signals = None, None
+    for candidate, origin in candidates:
         if stop is not None and stop.is_set():
             raise InterruptedError("Research worker is stopping")
-        progress(f"{symbol}: testing {candidate['name']} at 1–{policy['max_leverage']}x")
-        signals = signal_series(bars, candidate, predictions, vectors)
-        for leverage in range(1, policy["max_leverage"]+1):
-            proposal = candidate | {"leverage": leverage}
-            scores = backtest(bars, signals, proposal, cfg, selection_start, test_start)
-            rows.append({"symbol": symbol, "candidate": proposal, "metrics": scores})
+        if cached_id != candidate["id"]:
+            progress(f"{symbol}: validation of {candidate['name']}")
+            signals = signal_series(bars, candidate, predictions, vectors, start=selection_start, end=test_start)
+            cached_id = candidate["id"]
+        scores = backtest(bars, signals, candidate, cfg, selection_start, test_start)
+        rows.append({"symbol": symbol, "candidate": candidate, "metrics": scores, "origin": origin})
     return artifacts, fitting, rows

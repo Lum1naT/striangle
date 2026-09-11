@@ -1,12 +1,14 @@
 """Forward-only futures paper portfolios; no exchange order-placement code."""
 from datetime import timedelta
+import copy
 import json
 import logging
 
 from django.db import transaction
 from django.utils import timezone
 
-from .auto_config import leverage_value, margin_config
+from .auto_config import candidate_config, leverage_value, margin_config
+from .auto_rules import model_keys
 from .auto_signals import signal
 from .engine import features
 from .margin import accrue_funding, close_position, entry_quantity, liquidatable, mark, metrics, new_wallet, open_position
@@ -24,13 +26,15 @@ def choose(portfolio, cfg, now, closing=False):
     wallet, market, candidate = portfolio["wallet"], portfolio["market"], portfolio["candidate"]
     if candidate is None:
         return 0, "No eligible strategy for this asset; virtual capital stays in cash.", {}
+    cfg = candidate_config(cfg, candidate)
     cache = portfolio.get("cached_signal", {})
     if cache.get("closed_at") != market.get("last_closed_at") or "value" not in cache:
         cache = {"closed_at": market.get("last_closed_at"), "value": signal(candidate, market.get("closes", []), portfolio["models"])}
         portfolio["cached_signal"] = cache
     strategy = cache["value"]
     f = features(market, now, cfg)
-    f.update(strategy=strategy, leverage=candidate["leverage"], margin=wallet["margin"], liquidation_price=wallet.get("liquidation_price"),
+    f.update(strategy=strategy, leverage=candidate["leverage"], stop_pct=cfg["stop_pct"], take_pct=cfg["take_pct"],
+        horizon_minutes=candidate["horizon"], margin=wallet["margin"], liquidation_price=wallet.get("liquidation_price"),
         mark_price=market.get("mark_price"), mark_age=now-market["mark_at"] if market.get("mark_at") is not None else None)
     if wallet["quantity"]:
         if closing or wallet["halted"]:
@@ -114,6 +118,7 @@ def depth_fill(portfolio, pending, book, cfg, now):
 
 
 def step_portfolio(portfolio, event, cfg, now, *, closing=False):
+    cfg = candidate_config(cfg, portfolio["candidate"])
     market, wallet = portfolio["market"], portfolio["wallet"]
     kind, body, at = event["kind"], event["payload"], event["at"]
     observed = min(event.get("received_at", at), event.get("event_at", at))
@@ -209,9 +214,15 @@ def seed_cycle(cycle, started):
         if consecutive:
             market.update(closes=[float(c.payload["close"]) for c in reversed(consecutive)],
                 last_opened=consecutive[0].opened_at.timestamp(), last_closed_at=consecutive[0].closed_at.timestamp())
-        models = {candidate["model_key"]: cycle.artifacts[symbol][candidate["model_key"]]} if candidate and candidate["family"] == "ml" else {}
+        models = {key: cycle.artifacts[symbol][key] for key in model_keys(candidate)}
         state["portfolios"][symbol] = {"candidate": candidate, "models": models, "market": market,
             "wallet": new_wallet(cycle.config["risk"]["capital"]), "candle_kind": "perp_candle" if table is FuturesCandle else "candle"}
+        baseline = report.get("comparisons", {}).get(symbol, {}).get("baseline")
+        if baseline:
+            base = baseline["candidate"]
+            state["portfolios"][symbol]["baseline"] = {"candidate": base,
+                "models": {key: cycle.artifacts[symbol][key] for key in model_keys(base)}, "market": copy.deepcopy(market),
+                "wallet": new_wallet(cycle.config["risk"]["capital"]), "candle_kind": state["portfolios"][symbol]["candle_kind"]}
     return state
 
 
@@ -248,12 +259,16 @@ def tick():
         for row in rows:
             now = timezone.now()
             portfolio = cycle.state["portfolios"][row.symbol]
-            for record in step_portfolio(portfolio, as_event(row), cfg, now.timestamp(), closing=cycle.status == "closing"):
-                records.append(AutoRecord(cycle=cycle, symbol=row.symbol, kind=record["kind"], event_id=row.id, at=now, payload=record["payload"]))
+            for role, p in [("selected", portfolio)] + ([("baseline", portfolio["baseline"])] if portfolio.get("baseline") else []):
+                for record in step_portfolio(p, as_event(row), cfg, now.timestamp(), closing=cycle.status == "closing"):
+                    records.append(AutoRecord(cycle=cycle, symbol=row.symbol, role=role, kind=record["kind"], event_id=row.id, at=now,
+                        payload=record["payload"] | {"portfolio_role": role}))
             cycle.last_event_id = row.id
-        if cycle.status == "closing" and all(not p["wallet"]["quantity"] for p in cycle.state["portfolios"].values()):
+        if cycle.status == "closing" and all(not p["wallet"]["quantity"] and not p.get("baseline", {}).get("wallet", {}).get("quantity", 0)
+                for p in cycle.state["portfolios"].values()):
             cycle.status, cycle.finished_at = "completed", now
             cycle.state["final_results"] = {s: metrics(p["wallet"], cfg) for s, p in cycle.state["portfolios"].items()}
+            cycle.state["baseline_results"] = {s: metrics(p["baseline"]["wallet"], cfg) for s, p in cycle.state["portfolios"].items() if p.get("baseline")}
         if rows or cycle.status in ("closing", "completed"):
             if rows:
                 cycle.state["processed_at"] = now.timestamp()

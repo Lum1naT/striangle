@@ -1,7 +1,7 @@
 """Bounds for the autonomous paper research service, independent of spot runs."""
 from .configuration import dec, validate_config
 
-AUTO_VERSION = "auto-v1"
+AUTO_VERSION = "auto-v2"
 MAX_LEVERAGE = 10
 AUTO_DEFAULTS = {"max_leverage": 10, "interval_hours": 24, "history_candles": 100000,
     "min_new_candles": 1440, "min_validation_trades": 5,
@@ -37,3 +37,21 @@ def leverage_value(value, cap=MAX_LEVERAGE):
     if isinstance(value, bool) or not 1 <= dec(value) <= min(MAX_LEVERAGE, cap) or dec(value) != int(dec(value)):
         raise ValueError("Leverage must be an integer within the configured cap and never above 10x")
     return int(value)
+
+
+def candidate_config(cfg, candidate):
+    """A strategy may tighten exit thresholds, never increase configured risk."""
+    if not candidate or candidate.get("family") != "combination":
+        return cfg
+    leverage_value(candidate["leverage"], cfg["max_leverage"])
+    result = dict(cfg)
+    for key in ("stop_pct", "take_pct"):
+        value = candidate[key]
+        if isinstance(value, bool) or not dec(".1") <= dec(value) <= dec(cfg[key]):
+            raise ValueError(f"Strategy {key} must stay within the configured limit")
+        result[key] = float(value)
+    horizon = candidate["horizon"]
+    if isinstance(horizon, bool) or horizon not in (15, 30, 60, 120, 240):
+        raise ValueError("Unsupported strategy holding period")
+    result["horizon_minutes"] = horizon
+    return result

@@ -63,8 +63,9 @@ def mark(wallet, price, at, cfg):
     return wallet["equity"]
 
 
-def entry_quantity(wallet, price, leverage, cfg, horizon_minutes=60):
+def entry_quantity(wallet, price, leverage, cfg, horizon_minutes=None):
     leverage = leverage_value(leverage, cfg["max_leverage"])
+    horizon_minutes = cfg.get("horizon_minutes", 60) if horizon_minutes is None else horizon_minutes
     fee = cfg["fee_bps"]/10000
     margin_budget = max(0, wallet["cash"]*cfg["allocation_pct"]/100)
     loss = cfg["stop_pct"]/100+2*(cfg["fee_bps"]+cfg["slippage_bps"])/10000+cfg["funding_bps_8h"]/10000*horizon_minutes/480

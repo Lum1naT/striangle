@@ -83,13 +83,14 @@ class AutoCycle(models.Model):
 class AutoRecord(models.Model):
     cycle = models.ForeignKey(AutoCycle, on_delete=models.CASCADE, related_name="records")
     symbol = models.CharField(max_length=20)
+    role = models.CharField(max_length=12, default="selected", db_default="selected")
     kind = models.CharField(max_length=15)
     event_id = models.BigIntegerField()
     at = models.DateTimeField()
     payload = models.JSONField()
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["cycle", "symbol", "kind", "event_id"], name="auto_record_once")]
+        constraints = [models.UniqueConstraint(fields=["cycle", "symbol", "role", "kind", "event_id"], name="auto_record_once")]
 
 
 class Run(models.Model):

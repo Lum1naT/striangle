@@ -20,6 +20,9 @@ def strategies():
 
 
 def signal(candidate, closes, artifacts):
+    if candidate["family"] == "combination":
+        from .auto_rules import live_signal
+        return live_signal(candidate, closes, artifacts)
     values = feature_vector(closes)
     if values is None:
         return {"enter": 0, "exit_long": False, "exit_short": False, "reason": "Waiting for 61 consecutive completed candles."}

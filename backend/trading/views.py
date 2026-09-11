@@ -218,11 +218,13 @@ def autonomy_control(request):
     if not request.user.is_staff:
         return JsonResponse({"error": "A workspace administrator controls the shared automatic research service"}, status=403)
     data = body(request)
-    if set(data)-{"enabled", "config"} or "enabled" not in data:
-        raise ValueError("Supply enabled and optional config")
+    if set(data)-{"enabled", "config", "run_now"} or "enabled" not in data:
+        raise ValueError("Supply enabled, optional config and optional run_now")
+    if type(data.get("run_now", False)) is not bool or data.get("run_now") and data["enabled"] is not True:
+        raise ValueError("run_now must be a boolean and requires enabled research")
     current = AutonomyPolicy.objects.filter(pk=1).first()
     autonomy.configure(data.get("config", current.config if current else None), data["enabled"])
-    autonomy.schedule_cycle()
+    autonomy.schedule_cycle(force=data.get("run_now", False))
     return JsonResponse(autonomy.summary())
 
 

@@ -150,6 +150,17 @@ try {
   await screenshot('autonomy-desktop');
   await page.locator('#autoStop').click();
   await page.locator('#autoStatus').filter({hasText: 'Stopped'}).waitFor();
+  manage('shell', '-c', "exec(open('tests/autonomy-ui-fixture.py').read())");
+  await page.reload();
+  await page.locator('[data-section="autonomyPanel"]').click();
+  await page.locator('#autoAssetChoices article').first().waitFor();
+  assert.equal(await page.locator('#autoAssetChoices article').count(), 4);
+  assert.equal(await page.locator('#autoSearchProgress tbody tr').count(), 16);
+  assert.equal(await page.locator('#autoPortfolios article').count(), 4);
+  assert.match(await page.locator('#autoPortfolios').textContent(), /Baseline shadow/);
+  assert.match(await page.locator('#autoAssetChoices').textContent(), /Selected from scikit-learn search/);
+  await assertFits();
+  await screenshot('autonomy-search-desktop');
   await page.setViewportSize({width: 390, height: 844});
   await assertFits();
   await screenshot('readiness-mobile');
@@ -158,6 +169,12 @@ try {
     await assertFits();
     await screenshot(`${section}-mobile`);
   }
+  await page.locator('#autoRunNow').click();
+  await page.locator('#autoStatus').filter({hasText: 'queued'}).waitFor();
+  const manualSearch = (await (await page.request.get(`${baseURL}/api/dashboard/`)).json()).autonomy;
+  assert.equal(manualSearch.latest.report.trigger, 'manual');
+  assert.equal(manualSearch.latest.status, 'queued');
+  assert.equal(await page.locator('#autoRunNow').isDisabled(), true);
   await page.locator('#logout').click();
   await page.locator('#authPanel').waitFor({state: 'visible'});
   assert.equal((await page.request.get(`${baseURL}/api/dashboard/`)).status(), 401);

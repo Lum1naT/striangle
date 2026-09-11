@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .auto_config import AUTO_VERSION, margin_config, validate_auto
+from .auto_rules import model_keys
 from .auto_search import backtest, price_features, rank_candidates, search_asset, signal_series
 from .ml import predict_vector
 from .models import AutoCycle, AutoRecord, AutonomyPolicy, Candle, FuturesCandle, Job
@@ -35,16 +36,16 @@ def configure(config=None, enabled=True):
     return policy
 
 
-def schedule_cycle(now=None):
+def schedule_cycle(now=None, *, force=False):
     now = now or timezone.now()
     with transaction.atomic():
         policy = AutonomyPolicy.objects.select_for_update().filter(pk=1).first()
-        if not policy or not policy.enabled or now < policy.next_run_at:
+        if not policy or not policy.enabled or not force and now < policy.next_run_at:
             return None
         if AutoCycle.objects.filter(status__in=["queued", "training", "ready"]).exists():
             return None
         config = validate_auto(policy.config)
-        if policy.last_cutoff:
+        if policy.last_cutoff and not force:
             minimum = config["min_new_candles"]
             for symbol in settings.SYMBOLS:
                 count = Candle.objects.filter(symbol=symbol, interval="1m", closed_at__gt=policy.last_cutoff,
@@ -54,7 +55,7 @@ def schedule_cycle(now=None):
                     policy.next_run_at = now+timedelta(minutes=5)
                     policy.save(update_fields=["status", "next_run_at"])
                     return None
-        cycle = AutoCycle.objects.create(config=config, cutoff=now)
+        cycle = AutoCycle.objects.create(config=config, cutoff=now, report={"trigger": "manual" if force else "scheduled"})
         Job.objects.create(kind="autotrain", params={"cycle_id": str(cycle.id)})
         policy.next_run_at = now+timedelta(hours=config["interval_hours"])
         policy.status = f"Research cycle {str(cycle.id)[:8]} queued"
@@ -121,39 +122,65 @@ def run_cycle(cycle_id, progress=lambda text: None, stop=None):
         ranked = rank_candidates(candidates, policy["min_validation_trades"], cfg["max_drawdown_pct"])
         by_asset = {symbol: next((r for r in ranked if r["symbol"] == symbol), None) for symbol in settings.SYMBOLS}
         champion = ranked[0] if ranked else None
-        holdout, allocated = None, None
-        if champion:
-            progress("Evaluating the fixed winner on the final historical period; no re-ranking")
-            symbol, candidate = champion["symbol"], champion["candidate"]
+        # Freeze one selected strategy, one fixed-family baseline and one
+        # searched combination per asset before inspecting any final results.
+        comparisons = {symbol: {"selected": by_asset[symbol],
+            "baseline": next((r for r in ranked if r["symbol"] == symbol and r["origin"] == "baseline"), None),
+            "searched": next((r for r in ranked if r["symbol"] == symbol and r["origin"] == "scikit_search"), None)} for symbol in settings.SYMBOLS}
+        for symbol, fixed in comparisons.items():
+            progress(f"{symbol}: evaluating frozen asset choices on the final historical period; no re-ranking")
             bars, _ = load_bars(table, symbol, cutoff, count)
             bars = [b for b in bars if b["opened_at"] >= start and b["closed_at"] <= end]
             vectors = price_features(bars)
-            predictions = {}
-            if candidate["family"] == "ml":
-                model_key = candidate["model_key"]
-                predictions[model_key] = [(predict_vector(artifacts[symbol][model_key], v) or {}).get("probability", -1) for v in vectors]
-            signals = signal_series(bars, candidate, predictions, vectors)
-            holdout = backtest(bars, signals, candidate, cfg, test_start, end)
+            needed = {key for row in fixed.values() if row for key in model_keys(row["candidate"])}
+            predictions = {key: [(predict_vector(artifacts[symbol][key], v) or {}).get("probability", -1)
+                if b["opened_at"] >= test_start else -1 for b, v in zip(bars, vectors)] for key in needed}
+            scores = {}
+            for role, row in list(fixed.items()):
+                if not row:
+                    continue
+                candidate = row["candidate"]
+                key = (candidate["id"], candidate["leverage"])
+                if key not in scores:
+                    signals = signal_series(bars, candidate, predictions, vectors, start=test_start, end=end)
+                    scores[key] = backtest(bars, signals, candidate, cfg, test_start, end)
+                fixed[role] = row | {"holdout": scores[key]}
+        holdout, allocated = None, None
+        if champion:
+            symbol = champion["symbol"]
+            holdout = comparisons[symbol]["selected"]["holdout"]
             qualified = rank_candidates([champion | {"metrics": holdout}], policy["min_validation_trades"], cfg["max_drawdown_pct"])
             if champion["metrics"]["return_pct"] > 0 and holdout["return_pct"] > 0 and qualified:
                 allocated = symbol
-        report = {"version": AUTO_VERSION, "source": source, "provenance": provenance, "fitting": fits,
+        trial_count = sum(fit["optimization"]["trial_count"] for fit in fits.values())
+        report = {"version": AUTO_VERSION, "trigger": cycle.report.get("trigger", "scheduled"), "source": source, "provenance": provenance, "fitting": fits,
             "train_start": start, "selection_start": selection_start, "test_start": test_start, "test_end": end,
+            "search_start": next(iter(fits.values()))["optimization"]["search_start"],
+            "search_trial_count": trial_count, "total_combinations": trial_count+sum(r["origin"] == "baseline" for r in candidates),
             "candidate_count": len(candidates), "eligible_count": len(ranked), "candidates": candidates,
-            "leaders": ranked[:24], "by_asset": by_asset, "champion": champion, "holdout": holdout,
+            "leaders": ranked[:24], "by_asset": by_asset, "comparisons": comparisons, "champion": champion, "holdout": holdout,
             "allocated_symbol": allocated, "allocation_reason": "Winner passed the predefined historical checks; future paper evidence is still required." if allocated else "Cash: no candidate passed positive validation and holdout returns, trade-count and drawdown checks. Asset challengers continue in separate virtual portfolios.",
-            "method": "Training uses the first 60%; C is selected on the next 20%. Twelve ML/rule strategies per asset are compared at every integer leverage from 1 to the configured cap. Highest validation net return wins among candidates meeting trade-count, drawdown and zero-liquidation limits; ties favor lower drawdown then lower leverage. Only that fixed winner is evaluated on the last 20%. No fallback candidate is selected using holdout results.",
+            "method": "The first 40% fits four directional price models, with C selected on a purged inner chronological split before refitting. "
+                "The next 20% is exclusively development feedback: a per-asset scikit-learn ExtraTrees regressor guides 96 entry/exit combinations over two chronological folds. "
+                "The best 12 eligible combinations are frozen, then compared on the next 20% against twelve fixed-family baselines at every integer leverage up to the cap. "
+                "Highest validation net return wins among candidates meeting trade-count, drawdown and zero-liquidation limits; ties favor lower drawdown then lower leverage. "
+                "Each asset's selected strategy, searched challenger and baseline are fixed before evaluation on the last 20%. No holdout result changes the search, ranking or fallback choice.",
             "assumptions": "Historical candle execution: next-open fills, fees/spread/adverse slippage, isolated margin, fixed maintenance-margin rate, and adverse funding accrual on entry notional for both long and short. Liquidation takes priority when touched within an ambiguous candle, then stop before take profit. Candle prices proxy historical mark prices; exchange tiers, ADL and historical depth are not reconstructed. Spot history also omits the futures basis.",
-            "forward_method": "Four independent virtual challenger portfolios start after model freezing. They use recorded live Bybit futures depth and mark prices. Funding remains the declared adverse accrual allowance, not actual settled funding. The designated capital stance uses one preselected portfolio or cash; challenger balances are not combined as an allocated account.",
+            "forward_method": "Four independent selected-strategy portfolios and their fixed baseline shadow portfolios start after model freezing. "
+                "They use identical virtual capital and recorded live Bybit futures depth and mark prices. The same numeric entry/exit evaluator runs in history and paper trading. "
+                "Live depth/flow/funding/liquidation/news gates are additional recorded-context vetoes; candle backtests cannot reconstruct those inputs. "
+                "Funding remains the declared adverse accrual allowance, not actual settled funding. The designated capital stance uses one preselected portfolio or cash; virtual challenger balances are not combined as an allocated account.",
             "evidence": "Historical windows may overlap previous research and are not fresh evidence on every retraining. Only the period after each cycle is frozen is its prospective test. Past returns cannot guarantee the most profitable future strategy. No real exchange orders are enabled."}
         cycle.artifacts, cycle.report = artifacts, report
         current_policy = AutonomyPolicy.objects.get(pk=1)
         cycle.status = "ready" if current_policy.enabled and current_policy.config == policy else "cancelled"
         cycle.save(update_fields=["artifacts", "report", "status"])
         if cycle.status == "ready":
+            if report["trigger"] == "manual":
+                AutoCycle.objects.filter(status="paper").exclude(pk=cycle.pk).update(status="closing")
             AutonomyPolicy.objects.filter(pk=1, enabled=True, config=policy).update(last_cutoff=cutoff, status="Research complete; waiting for forward paper activation")
         log.info("auto_search_completed %s", json.dumps({"cycle": str(cycle.id), "candidates": len(candidates),
-            "source": source, "champion": champion, "holdout": holdout, "allocated_symbol": allocated}))
+            "search_trials": trial_count, "source": source, "champion": champion, "holdout": holdout, "allocated_symbol": allocated}))
         return {"cycle_id": str(cycle.id), "candidate_count": len(candidates), "allocated_symbol": allocated}
 
 
@@ -170,14 +197,23 @@ def summary(full=True):
         data["cycle"] = {"id": str(active.id), "status": active.status, "forward_start": active.forward_start,
             "forward_end": active.forward_end, "selected_symbol": active.state.get("allocated_symbol"),
             "portfolios": {s: {"candidate": p["candidate"], "metrics": metrics(p["wallet"], cfg),
-                "signal": p.get("signal"), "book_at": p["market"].get("book_at"), "mark_at": p["market"].get("mark_at")} for s, p in active.state.get("portfolios", {}).items()},
+                "signal": p.get("signal"), "book_at": p["market"].get("book_at"), "mark_at": p["market"].get("mark_at"),
+                "baseline": {"candidate": p["baseline"]["candidate"], "metrics": metrics(p["baseline"]["wallet"], cfg),
+                    "signal": p["baseline"].get("signal")} if p.get("baseline") else None} for s, p in active.state.get("portfolios", {}).items()},
             "last_event_id": active.last_event_id, "processed_at": active.state.get("processed_at")}
     if full:
         latest = AutoCycle.objects.defer("artifacts", "state").order_by("created_at").last()
         data["latest"] = {"id": str(latest.id), "status": latest.status, "cutoff": latest.cutoff,
-            "error": latest.error, "report": {k: v for k, v in latest.report.items() if k != "candidates"}} if latest else None
-        data["records"] = list(AutoRecord.objects.filter(cycle=active).order_by("-id").values("symbol", "kind", "at", "payload")[:30]) if active else []
+            "error": latest.error, "report": public_report(latest.report)} if latest else None
+        data["records"] = list(AutoRecord.objects.filter(cycle=active).order_by("-id").values("symbol", "role", "kind", "at", "payload")[:30]) if active else []
         data["history"] = [{"id": str(c.id), "status": c.status, "start": c.forward_start, "end": c.finished_at,
             "result": c.state.get("final_results", {}), "selected_symbol": c.state.get("allocated_symbol")}
             for c in AutoCycle.objects.defer("report", "artifacts").filter(status="completed").order_by("-created_at")[:8]]
     return data
+
+
+def public_report(report):
+    result = {k: v for k, v in report.items() if k != "candidates"}
+    result["fitting"] = {s: {**fit, "optimization": {k: v for k, v in fit["optimization"].items() if k != "trials"}}
+        if "optimization" in fit else fit for s, fit in report.get("fitting", {}).items()}
+    return result

@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
-from trading.auto_config import leverage_value, margin_config, validate_auto
+from trading.auto_config import candidate_config, leverage_value, margin_config, validate_auto
 from trading.auto_paper import choose, step_portfolio, tick
 from trading.auto_search import backtest, rank_candidates, search_asset
 from trading.auto_signals import signal, strategies
@@ -115,12 +115,13 @@ class AutonomousSearchTests(SimpleTestCase):
         self.assertEqual(models, self.models)
         self.assertEqual(rows, self.rows)
         self.assertEqual(fitting, self.fitting)
-        for part in fitting.values():
-            self.assertLess(part["last_training_label"], self.start)
-            self.assertLess(part["last_validation_label"], self.end)
+        for part in fitting["models"].values():
+            self.assertLess(part["last_training_label"], fitting["optimization"]["search_start"])
+            self.assertLess(part["last_validation_label"], fitting["optimization"]["search_start"])
 
     def test_search_contains_all_directions_and_each_allowed_leverage(self):
-        self.assertEqual(len(self.rows), 24)
+        self.assertEqual(sum(r["origin"] == "baseline" for r in self.rows), 24)
+        self.assertEqual(sum(r["origin"] == "scikit_search" for r in self.rows), 12)
         self.assertEqual({r["candidate"]["leverage"] for r in self.rows}, {1, 2})
         self.assertEqual(set(self.models), {"15:1", "15:-1", "60:1", "60:-1"})
         for r in self.rows:
@@ -128,6 +129,31 @@ class AutonomousSearchTests(SimpleTestCase):
         for c in strategies():
             self.assertIn(signal(c, [b["close"] for b in self.data[:61]], self.models)["enter"], (-1, 0, 1))
         json.dumps(self.rows, allow_nan=False)
+
+    def test_later_validation_cannot_train_the_search_or_price_models(self):
+        changed = copy.deepcopy(self.data)
+        for i, bar in enumerate(changed[3000:]):
+            for key in ("open", "close", "high", "low"):
+                bar[key] *= 1+i*.002
+        models, fitting, rows = search_asset("BTCUSDT", changed, self.policy, self.start, self.end)
+        self.assertEqual(models, self.models)
+        self.assertEqual(fitting, self.fitting)
+        self.assertEqual([r["candidate"] for r in rows], [r["candidate"] for r in self.rows])
+        self.assertNotEqual([r["metrics"] for r in rows], [r["metrics"] for r in self.rows])
+
+    def test_search_fits_feedback_model_and_keeps_exploring(self):
+        search = self.fitting["optimization"]
+        self.assertEqual(search["algorithm"], "ExtraTreesRegressor")
+        self.assertEqual(search["trial_count"], 96)
+        self.assertEqual([r["trials"] for r in search["rounds"]], [24, 48, 72, 96])
+        self.assertEqual(sum(r["model_guided"] for r in search["rounds"]), 48)
+        self.assertEqual(len({t["candidate"]["id"] for t in search["trials"]}), 96)
+        self.assertTrue(any(p["importance"] > 0 for p in search["parameter_importance"]))
+        for trial in search["trials"]:
+            self.assertEqual(trial["surrogate"] is not None, trial["proposal"] == "model_guided")
+            cfg = candidate_config(margin_config(self.policy), trial["candidate"])
+            self.assertLessEqual(cfg["stop_pct"], self.policy["risk"]["stop_pct"])
+            self.assertLessEqual(cfg["take_pct"], self.policy["risk"]["take_pct"])
 
     def test_ranking_excludes_liquidation_and_resolves_numerical_ties_with_lower_leverage(self):
         row = {"symbol": "BTCUSDT", "candidate": {"id": "fixture", "leverage": 1},

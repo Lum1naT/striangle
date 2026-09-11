@@ -1,10 +1,10 @@
 export function setupAutonomy({$, element, fmt, when, api, busy, message, refresh}) {
-  let current, configKey = '', reportKey = '', recordsKey = '';
+  let current, latestStatus, configKey = '', reportKey = '', recordsKey = '';
   const fields = [
     ['capital', 'Virtual capital per challenger, USDT', 10, 10000000, 1],
     ['allocation_pct', 'Maximum cash committed to margin and entry fee, %', .1, 100, .1],
     ['risk_per_trade_pct', 'Planned equity risk per trade, %', .01, 5, .01],
-    ['stop_pct', 'Price stop, %', .1, 30, .1], ['take_pct', 'Price take profit, %', .1, 100, .1],
+    ['stop_pct', 'Maximum price stop for search, %', .1, 30, .1], ['take_pct', 'Maximum profit target for search, %', .1, 100, .1],
     ['max_drawdown_pct', 'Maximum drawdown, %', .1, 50, .1], ['daily_loss_pct', 'Daily loss limit, %', .1, 20, .1],
     ['fee_bps', 'Fee per side, basis points', 0, 100, 1], ['slippage_bps', 'Adverse slippage, basis points', 0, 100, 1],
     ['funding_bps_8h', 'Adverse funding allowance / 8 hours, bp', 0, 100, .1],
@@ -26,6 +26,10 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
     await api('autonomy/control/', {enabled: false}); await refresh();
     message('Automatic research stopped. Open paper positions will close on fresh futures books.');
   });
+  $('autoRunNow').onclick = () => busy($('autoRunNow'), async () => {
+    await api('autonomy/control/', {enabled: true, run_now: true}); await refresh();
+    message('Search queued with saved settings. The current paper cycle will flatten when the new search is ready.');
+  });
   function table(headers, rows, caption) {
     const t = element('table'), head = element('thead'), tr = element('tr'), body = element('tbody');
     if (caption) t.append(element('caption', caption));
@@ -37,6 +41,7 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
   return function render(data, canControl, full) {
     if (!data) return;
     current = data;
+    if (full) latestStatus = data.latest?.status;
     $('autoStatus').textContent = `${data.enabled ? 'Enabled' : 'Stopped'} · ${data.status}${data.next_run_at && data.enabled ? ` · Next scheduled check ${when(data.next_run_at)} UTC` : ''}`;
     const key = JSON.stringify([data.config, canControl]);
     if (key !== configKey) {
@@ -47,6 +52,7 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
       $('autoEnable').disabled = !canControl;
     }
     $('autoStop').disabled = !canControl || !data.enabled;
+    $('autoRunNow').disabled = !canControl || !data.enabled || ['queued', 'training', 'ready'].includes(latestStatus);
     $('autoEnable').textContent = data.enabled ? 'Save automatic settings' : 'Enable automatic research';
     $('autoControlNote').textContent = canControl ? 'These controls manage the shared paper research service for this workspace.' : 'A workspace administrator manages automatic research. You can inspect all results here.';
     const cycle = data.cycle;
@@ -62,6 +68,8 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
         element('p', `${p.signal?.action.toUpperCase() || 'WAIT'} · ${p.signal?.reason || 'Waiting for fresh futures observations.'}`, 'signal-reason'),
         element('p', `Futures book ${when(p.book_at)} · Mark ${when(p.mark_at)} UTC`, 'small muted'));
       if (m.halted) card.append(element('p', m.halted, 'negative'));
+      if (c?.entry_description) card.append(element('p', c.entry_description, 'small'), element('p', c.exit_description, 'small'));
+      if (p.baseline) card.append(element('p', `Baseline shadow: ${p.baseline.candidate.name} · ${p.baseline.candidate.leverage}× · ${fmt(p.baseline.metrics.return_pct)}% net · ${p.baseline.metrics.closed_trades} trades`, 'small muted'));
       if (p.signal?.inputs) { const d = element('details'); d.dataset.symbol = symbol; d.open = openSymbols.has(symbol); d.append(element('summary', 'Current decision inputs'), element('pre', JSON.stringify(p.signal.inputs, null, 2))); card.append(d); }
       return card;
     }));
@@ -72,7 +80,23 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
       reportKey = nextReportKey;
       const winner = report?.champion;
       $('autoWinner').textContent = winner ? `${winner.symbol.replace('USDT', '')} · ${winner.candidate.name} · ${winner.candidate.leverage}×` : latest ? `Research ${latest.status}` : 'Waiting for the first search.';
-      $('autoResult').textContent = latest?.error || (winner ? `Validation net ${fmt(winner.metrics.return_pct)}% · Fixed-winner historical test ${fmt(report.holdout?.return_pct)}% · ${report.candidate_count} candidates. ${report.allocation_reason}` : report?.allocation_reason || 'The daily worker will train and compare strategies after you enable it.');
+      $('autoResult').textContent = latest?.error || (winner ? `Validation net ${fmt(winner.metrics.return_pct)}% · Fixed-winner historical test ${fmt(report.holdout?.return_pct)}% · ${report.candidate_count} validation candidates${report.search_trial_count ? ` after ${report.search_trial_count} development trials` : ''}. ${report.allocation_reason}` : report?.allocation_reason || 'The daily worker will train and compare strategies after you enable it.');
+      const searches = Object.entries(report?.fitting || {}).filter(([, fit]) => fit.optimization);
+      $('autoSearchProgress').replaceChildren(searches.length ? table(['Asset', 'Round', 'Tested', 'Model-guided', 'Exploration', 'Best development score'],
+        searches.flatMap(([symbol, fit]) => fit.optimization.rounds.map(r => [symbol.replace('USDT', ''), r.round, r.trials, r.model_guided, r.exploration, fmt(r.best_objective, 3)])),
+        'Development scores guide exploration only. Final choices use the later validation period.') : element('p', latest ? `Research ${latest.status}. Search rounds appear when the cycle completes.` : 'Enable automatic research to start the entry/exit search.', 'muted'));
+      $('autoAssetChoices').replaceChildren(...Object.entries(report?.comparisons || {}).map(([symbol, comparison]) => {
+        const card = element('article', undefined, 'comparison-card'), chosen = comparison.selected, c = chosen?.candidate;
+        card.append(element('strong', symbol.replace('USDT', '')), element('p', c ? `${c.name} · ${c.leverage}×` : 'No eligible candidate'),
+          element('p', chosen?.origin === 'scikit_search' ? 'Selected from scikit-learn search' : chosen ? 'Fixed-family baseline won validation' : 'Cash', 'small muted'));
+        if (c?.entry_description) card.append(element('p', c.entry_description), element('p', c.exit_description));
+        if (chosen) card.append(element('p', `Validation ${fmt(chosen.metrics.return_pct)}% · Holdout ${fmt(chosen.holdout?.return_pct)}% · ${chosen.holdout?.closed_trades ?? 0} holdout trades`));
+        for (const [role, label] of [['searched', 'Searched combination'], ['baseline', 'Fixed baseline']]) {
+          const row = comparison[role];
+          card.append(element('p', row ? `${label}: ${row.candidate.name} · ${row.candidate.leverage}× · validation ${fmt(row.metrics.return_pct)}% · holdout ${fmt(row.holdout?.return_pct)}%` : `${label}: no eligible candidate`, 'small muted'));
+        }
+        return card;
+      }));
       $('autoLeaderboard').replaceChildren(table(['Asset', 'Strategy', 'Leverage', 'Validation net', 'Drawdown', 'Trades'],
         (report?.leaders || []).map(r => [r.symbol.replace('USDT', ''), r.candidate.name, `${r.candidate.leverage}×`, `${fmt(r.metrics.return_pct)}%`, `${fmt(r.metrics.max_drawdown_pct)}%`, r.metrics.closed_trades]), 'Eligible candidates ranked on validation only; ties favor lower drawdown, then lower leverage.'));
       $('autoMethod').replaceChildren(...(report?.method ? [`Source: ${report.source}. Snapshot ${when(latest.cutoff)} UTC.`, report.method, report.assumptions, report.forward_method, report.evidence] : ['Historical spot candles are a price proxy until enough futures candles are recorded. Funding is an adverse allowance, not actual settlement history. No future profitability is guaranteed.']).map(t => element('p', t)));
@@ -84,7 +108,7 @@ export function setupAutonomy({$, element, fmt, when, api, busy, message, refres
       $('autoRecords').replaceChildren(...(data.records || []).map(r => {
         const item = element('article', undefined, 'decision'), d = element('details');
         d.append(element('summary', 'Recorded inputs'), element('pre', JSON.stringify(r.payload, null, 2)));
-        item.append(element('strong', `${r.symbol.replace('USDT', '')} · ${r.kind} · ${r.payload.action} · ${when(r.at)} UTC`), element('p', r.payload.reason), d); return item;
+        item.append(element('strong', `${r.symbol.replace('USDT', '')} · ${r.role || 'selected'} · ${r.kind} · ${r.payload.action} · ${when(r.at)} UTC`), element('p', r.payload.reason), d); return item;
       }));
     }
     $('autoHistory').replaceChildren(table(['Cycle', 'Asset', 'Designated stance', 'Net return', 'Trades', 'Liquidations'], (data.history || []).flatMap(c => Object.entries(c.result).map(([s, m]) => [c.id.slice(0, 8), s.replace('USDT', ''), c.selected_symbol?.replace('USDT', '') || 'cash', `${fmt(m.return_pct)}%`, m.closed_trades, m.liquidations]))));
