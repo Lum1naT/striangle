@@ -15,7 +15,9 @@ projects:
               - key: DJANGO_DEBUG
                 value: "false"
               - key: AI_DAILY_ATTEMPT_LIMIT
-                value: "600"
+                value: "1200"
+              - key: TRADING_SYMBOLS
+                value: BTCUSDT,XRPUSDT,SOLUSDT,ETHUSDT
               - key: LIVE_TRADING_ENABLED
                 value: "false"
               - key: BINANCE_TESTNET

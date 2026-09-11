@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 const labels = {trend: 'Trend baseline', rsi: 'RSI baseline', ai_trend: 'AI-assisted trend'};
+const assets = {BTCUSDT: 'Bitcoin', XRPUSDT: 'XRP', SOLUSDT: 'Solana', ETHUSDT: 'Ethereum'};
 const fmt = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? '—' : new Intl.NumberFormat('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits}).format(Number(value));
 const when = value => value ? new Date(typeof value === 'number' ? value * 1000 : value).toISOString().replace('T', ' ').slice(0, 19) : '—';
 const localInput = value => new Date(value).toISOString().slice(0, 16);
@@ -83,22 +84,42 @@ function renderSources() {
   }));
 }
 function currentMarket() { return snapshot?.markets.find(m => m.symbol === $('botSymbol').value); }
+function selectAsset(symbol) {
+  $('botSymbol').value = symbol;
+  resetValidation(); selectedId = null; ++detailSequence; $('runInspector').hidden = true;
+  renderAssetOverview(); renderMarket(); renderRunLists(); updateDates(true);
+}
+function renderAssetOverview() {
+  $('assetOverview').replaceChildren(...Object.entries(assets).map(([symbol, name]) => {
+    const market = snapshot.markets.find(m => m.symbol === symbol), book = market?.records.book;
+    const button = element('button', undefined, 'asset-card'); button.type = 'button';
+    button.setAttribute('aria-pressed', String($('botSymbol').value === symbol));
+    button.disabled = !market; button.onclick = () => selectAsset(symbol);
+    const price = book ? (Number(book.payload.bids[0][0])+Number(book.payload.asks[0][0]))/2 : null;
+    button.append(element('span', `${symbol.replace('USDT', '')} · ${name}`), element('strong', price == null ? '—' : fmt(price, price < 10 ? 4 : 2)+' USDT'),
+      element('small', `${fmt(market?.candles || 0, 0)} candles · ${!book ? 'waiting for feed' : Date.now()-Date.parse(book.at)>10000 ? 'stale quote' : 'live quote'}`));
+    return button;
+  }));
+}
 function renderMarket() {
   const market = currentMarket(); if (!market) return;
   const records = market.records, book = records.book?.payload, symbol = market.symbol;
   $('bookSymbol').textContent = symbol.replace('USDT', ' / USDT'); $('exportEvents').href = '/api/events/?symbol=' + encodeURIComponent(symbol);
   $('candleCount').textContent = fmt(market.candles, 0); $('recordingSince').textContent = when(market.recording_since).slice(0, 16);
+  $('datasetCoverage').textContent = market.candles ? `${fmt(market.candles, 0)} ${symbol.replace('USDT', '')} candles · ${when(market.candle_start).slice(0,16)} to ${when(market.candle_end).slice(0,16)} UTC` : 'No historical candles yet.';
+  $('exportCandles').href = '/api/candles.csv?symbol='+encodeURIComponent(symbol);
+  $('viewAssetChart').href = '/?symbol='+encodeURIComponent(symbol);
   $('bookRows').replaceChildren();
   if (book) {
     const bid = Number(book.bids[0][0]), ask = Number(book.asks[0][0]);
-    $('marketPrice').textContent = fmt((bid + ask) / 2) + ' USDT';
+    $('marketPrice').textContent = fmt((bid + ask) / 2, ask < 10 ? 4 : 2) + ' USDT';
     const age = (Date.now() - Date.parse(records.book.at)) / 1000;
     $('bookFreshness').textContent = `${age > 10 ? 'Stale snapshot' : 'Last received'} · ${when(records.book.at)} UTC`;
     $('bookFreshness').classList.toggle('negative', age > 10);
     $('spreadValue').textContent = fmt((ask - bid) / ((ask + bid) / 2) * 10000) + ' bp';
     for (let i = 0; i < Math.min(8, book.bids.length, book.asks.length); i++) {
       const tr = document.createElement('tr');
-      [fmt(book.bids[i][1], 5), fmt(book.bids[i][0]), fmt(book.asks[i][0]), fmt(book.asks[i][1], 5)].forEach(v => tr.append(element('td', v)));
+      [fmt(book.bids[i][1], 5), fmt(book.bids[i][0], bid < 10 ? 4 : 2), fmt(book.asks[i][0], ask < 10 ? 4 : 2), fmt(book.asks[i][1], 5)].forEach(v => tr.append(element('td', v)));
       $('bookRows').append(tr);
     }
   } else { $('marketPrice').textContent = '—'; $('bookFreshness').textContent = 'Waiting for recorded observations'; $('spreadValue').textContent = '—'; }
@@ -156,8 +177,16 @@ function renderRunLists() {
   $('checkReadiness').disabled = !$('readinessRun').options.length;
 }
 function renderJobs() {
-  $('jobList').replaceChildren(...snapshot.jobs.slice(0, 5).map(job => {
-    const row = element('div', undefined, 'job-item'); row.append(element('strong', `${job.kind} · ${job.status}`), element('span', job.error || when(job.created_at)));
+  $('jobList').replaceChildren(...snapshot.jobs.slice(0, 8).map(job => {
+    const row = element('div', undefined, 'job-item'); row.append(element('strong', `${job.params?.symbol?.replace('USDT', '') || ''} ${job.kind} · ${job.status}`));
+    if (job.kind === 'history') {
+      const done = job.result?.candles || 0, total = job.result?.requested || job.params.count;
+      const progress = document.createElement('progress'); progress.max = total; progress.value = done; progress.setAttribute('aria-label', `${job.params.symbol} history import`);
+      row.append(progress, element('span', `${fmt(done, 0)} / ${fmt(total, 0)} candles processed${job.result?.exhausted ? ' · reached available provider history' : ''}`));
+      if (job.result?.missing_minutes) row.append(element('small', `${fmt(job.result.missing_minutes, 0)} missing minutes in this window; gaps remain unfilled.`));
+      if (job.status === 'failed') row.append(actionButton('Resume import', async () => { await api(`jobs/${job.id}/resume/`, {}); await refresh(); }));
+    }
+    row.append(element('span', job.error || when(job.created_at)));
     if (job.result?.run_id) row.append(actionButton('View result', () => inspect(job.result.run_id, true)));
     return row;
   }));
@@ -168,7 +197,7 @@ async function refresh() {
   try {
     snapshot = await api('dashboard/');
     if (!initialized) { setConfig(snapshot.defaults); initialized = true; }
-    renderSources(); renderMarket(); renderRunLists(); renderJobs(); updateDates();
+    renderSources(); renderAssetOverview(); renderMarket(); renderRunLists(); renderJobs(); updateDates();
     const activeLive = snapshot.runs.some(r => r.mode === 'live' && ['running', 'reconciling'].includes(r.status));
     $('executionBadge').textContent = activeLive ? snapshot.execution_environment : 'Paper trading';
     const stale = snapshot.sources.some(s => ['stale', 'disconnected', 'error'].includes(s.status));
@@ -242,7 +271,11 @@ $('loginForm').onsubmit = e => { e.preventDefault(); busy(e.submitter, async () 
   await api('session/'); const data = await api('login/', {username: $('username').value, password: $('password').value}); $('password').value = ''; showWorkspace(data.username); await refresh();
 }); };
 $('logout').onclick = () => busy($('logout'), async () => { await api('logout/', {}); showAuth(); message('Signed out.'); });
-$('historyForm').onsubmit = e => { e.preventDefault(); busy(e.submitter, async () => { await api('jobs/', {kind: 'history', symbol: $('botSymbol').value, count: Number($('historyCount').value)}); message('History import queued. The research worker will fetch completed real candles.'); await refresh(); }); };
+$('historyForm').onsubmit = e => { e.preventDefault(); busy(e.submitter, async () => {
+  const scope = e.submitter.value === 'all' ? {symbols: snapshot.markets.map(m => m.symbol)} : {symbol: $('botSymbol').value};
+  await api('jobs/', {kind: 'history', ...scope, count: Number($('historyCount').value), ...($('historyEnd').value ? {end: Date.parse($('historyEnd').value+'Z')/1000} : {})});
+  message('History import queued. Progress and saved candles appear below.'); await refresh();
+}); };
 $('researchForm').onsubmit = e => { e.preventDefault(); busy(e.submitter, async () => {
   const parseList = id => $(id).value.split(',').map(x => Number(x.trim()));
   await api('jobs/', {kind: 'backtest', symbol: $('botSymbol').value, mode: $('researchMode').value, selection_strategy: $('selectionStrategy').value, config: readConfig(),
@@ -259,7 +292,7 @@ $('checkReadiness').onclick = () => busy($('checkReadiness'), async () => {
     const text = element('div'); text.append(element('strong', c.label), element('p', c.detail)); row.append(text); return row;
   }));
 });
-$('botSymbol').onchange = () => { resetValidation(); selectedId = null; $('runInspector').hidden = true; renderMarket(); renderRunLists(); updateDates(true); };
+$('botSymbol').onchange = () => selectAsset($('botSymbol').value);
 $('researchMode').onchange = () => { if ($('researchMode').value === 'candles' && $('selectionStrategy').value === 'ai_trend') $('selectionStrategy').value = 'trend'; updateDates(true); };
 $('closeInspector').onclick = () => { selectedId = null; ++detailSequence; $('runInspector').hidden = true; };
 window.addEventListener('resize', drawCurve);

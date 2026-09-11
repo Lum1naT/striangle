@@ -8,6 +8,8 @@ The new `/bots.html` dashboard connects real market recording, chronological bac
 
 **[Setup, architecture, data coverage, operating limits and live activation](docs/trading-system.md)**
 
+BTC, XRP, SOL and ETH have dedicated asset cards. Import up to 1,000,000 real one-minute candles per asset into PostgreSQL, resume interrupted imports, and export the full training dataset as CSV. The default 100,000-candle import can be queued for all four assets at once; chronological research supports 100,000 candles per job.
+
 The existing browser chart and optimizer still run independently without a backend. Crypto candles use a public API; forex and commodities require your own Twelve Data API key. The sections below describe that browser research workspace.
 
 ## Use
@@ -52,7 +54,7 @@ When changing cached assets, increment the service-worker cache version. No clie
 
 ## Real market data
 
-- Crypto: [Binance public market-data API](https://developers.binance.com/en/docs/products/spot/faqs/market_data_only), no key. BTC/USDT, ETH/USDT, SOL/USDT and other Binance spot pairs. Requests paginate backward, up to 5,000 completed bars. Exchange server time determines whether a candle is complete.
+- Crypto: [Binance public market-data API](https://developers.binance.com/en/docs/products/spot/faqs/market_data_only), no key. Quick switches for BTC/USDT, XRP/USDT, SOL/USDT and ETH/USDT; other Binance spot symbols can still be typed. Requests paginate backward with progress and cancellation, up to 100,000 completed bars. Exchange server time determines whether a candle is complete.
 - Forex and commodities: [Twelve Data forex](https://twelvedata.com/forex) and [commodity time series](https://twelvedata.com/commodities). Enter your own key in the app. Presets include EUR/USD, GBP/USD, EUR/CZK, gold, silver, WTI and Brent spot. Pair availability, delays and history depend on provider entitlement. These are spot instruments, not futures contracts.
 - Supported intervals: 1m, 5m, 15m, 1h, 4h and 1d. Fetch is manual; displayed data is a timestamped snapshot, not a streaming price. The Twelve Data newest candle is always omitted because session closing times vary; a 5,000-point response therefore yields at most 4,999 test candles. Short histories are reported by actual count.
 - API requests go directly from the browser to the named provider with omitted credentials, no referrer and no HTTP cache. The user-entered Twelve Data key stays in page memory/input only, never localStorage, IndexedDB, source or service-worker caches. Reload or Clear key removes it. Never put a shared secret into client source. There is no proxy that bypasses provider restrictions.

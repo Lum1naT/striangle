@@ -3,6 +3,7 @@ from pathlib import Path
 
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
+from trading.markets import ASSETS
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
@@ -57,10 +58,12 @@ SECURE_REDIRECT_EXEMPT = [r"^healthz/$"]
 SECURE_HSTS_SECONDS = 0 if DEBUG else 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 DATA_UPLOAD_MAX_MEMORY_SIZE = 100_000
-SYMBOLS = tuple(os.getenv("TRADING_SYMBOLS", "BTCUSDT,ETHUSDT").split(","))
+SYMBOLS = tuple(dict.fromkeys(x.strip().upper() for x in os.getenv("TRADING_SYMBOLS", ",".join(ASSETS)).split(",") if x.strip()))
+if not SYMBOLS or set(SYMBOLS) - ASSETS.keys():
+    raise ImproperlyConfigured("TRADING_SYMBOLS must select BTCUSDT, XRPUSDT, SOLUSDT or ETHUSDT")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "")
-AI_DAILY_ATTEMPT_LIMIT = int(os.getenv("AI_DAILY_ATTEMPT_LIMIT", "600"))
+AI_DAILY_ATTEMPT_LIMIT = int(os.getenv("AI_DAILY_ATTEMPT_LIMIT", "1200"))
 if not 1 <= AI_DAILY_ATTEMPT_LIMIT <= 10000:
     raise ImproperlyConfigured("AI_DAILY_ATTEMPT_LIMIT must be between 1 and 10,000")
 COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY", "")

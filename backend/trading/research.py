@@ -9,8 +9,10 @@ from django.utils import timezone
 from .configuration import fingerprint, validate_config, dec
 from .engine import features, initial_state, mark, metrics, signal, simulate_fill, step
 from .models import Candle, Event, Job, Run
-from .providers import fetch_candles
-from .recording import stamp
+from .history import HistoryPaused, import_history
+from .markets import MAX_RESEARCH_CANDLES
+from .providers import ProviderError
+from .recording import heartbeat, stamp
 
 
 def as_event(row):
@@ -138,13 +140,16 @@ def chronological_research(data, configs, mode, selection_strategy):
         "caution": "Repeatedly choosing configurations after viewing holdout results contaminates that holdout. Paper trading begins on future data with frozen settings."}
 
 
-def perform_job(job):
+def perform_job(job, stop=None):
     params = job.params
     symbol = params["symbol"]
     if job.kind == "history":
-        bars = fetch_candles(symbol, params.get("count", 1000))
-        Candle.objects.bulk_create([Candle(symbol=symbol, opened_at=stamp(b["opened_at"]), closed_at=stamp(b["closed_at"]), payload=b) for b in bars], ignore_conflicts=True)
-        return {"candles": len(bars), "symbol": symbol, "provider": "Binance spot", "interval": "1m"}
+        def checkpoint(progress):
+            job.result = progress
+            job.save(update_fields=["result"])
+            transaction.on_commit(lambda: heartbeat("research", "running", f"Importing {symbol}: {progress['candles']:,}/{progress['requested']:,} candles"))
+        return import_history(symbol, params.get("count", 100000), end_ms=params.get("end_ms"),
+            checkpoint=job.result, save_checkpoint=checkpoint, stop=stop)
     mode = params["mode"]
     base = validate_config(params.get("config"))
     configs = candidate_configs(base, params.get("fast_values", [base["fast"]]), params.get("slow_values", [base["slow"]]))
@@ -157,9 +162,9 @@ def perform_job(job):
             raise ValueError("Replay is limited to 250,000 events per job; choose a shorter interval")
         data = [as_event(e) for e in query]
     else:
-        data = list(Candle.objects.filter(symbol=symbol, opened_at__gte=start, closed_at__lte=end).order_by("opened_at").values_list("payload", flat=True)[:20001])
-        if len(data) > 20000:
-            raise ValueError("Candle research is limited to 20,000 bars per job")
+        data = list(Candle.objects.filter(symbol=symbol, opened_at__gte=start, closed_at__lte=end).order_by("opened_at").values_list("payload", flat=True)[:MAX_RESEARCH_CANDLES+1])
+        if len(data) > MAX_RESEARCH_CANDLES:
+            raise ValueError("Candle research is limited to 100,000 bars per job; choose a shorter window or export the full training dataset")
     chosen, results = chronological_research(data, configs, mode, params.get("selection_strategy", "trend"))
     run = Run.objects.create(owner=job.owner, symbol=symbol, name=f"{symbol} {mode} research", mode=mode, status="completed",
         config=chosen, config_hash=fingerprint(chosen, settings.OPENAI_MODEL), results=results,
@@ -167,7 +172,7 @@ def perform_job(job):
     return {"run_id": str(run.id)}
 
 
-def work_one_job():
+def work_one_job(stop=None):
     with transaction.atomic():
         # Single research worker; row locking also makes claiming safe on Postgres.
         job = Job.objects.select_for_update().filter(status="queued").order_by("created_at").first()
@@ -176,11 +181,21 @@ def work_one_job():
         job.status, job.started_at = "running", timezone.now()
         job.save(update_fields=["status", "started_at"])
     try:
-        result = perform_job(job)
+        result = perform_job(job, stop)
         job.result, job.status = result, "completed"
+    except HistoryPaused:
+        job.status, job.finished_at = "queued", None
+        job.save(update_fields=["result", "status", "finished_at"])
+        return True
     except Exception as exc:
+        job.refresh_from_db(fields=["result"])
         job.status = "failed"
-        job.error = str(exc)[:500] if isinstance(exc, ValueError) else f"Research failed ({type(exc).__name__}); inspect worker logs."
+        job.error = str(exc)[:500] if isinstance(exc, (ValueError, ProviderError)) else f"Research failed ({type(exc).__name__}); inspect worker logs."
     job.finished_at = timezone.now()
     job.save(update_fields=["result", "status", "error", "finished_at"])
     return True
+
+
+def recover_jobs():
+    Job.objects.filter(status="running", kind="history").update(status="queued", error="", finished_at=None)
+    Job.objects.filter(status="running").exclude(kind="history").update(status="failed", error="Research worker restarted before completion; submit a new job", finished_at=timezone.now())

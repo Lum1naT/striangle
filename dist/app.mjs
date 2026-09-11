@@ -26,7 +26,7 @@ function drawEquity(){if(!result||$('overview').hidden)return;const {ctx,w,h}=se
 $('chart').addEventListener('wheel',e=>{e.preventDefault();view.count*=e.deltaY>0?1.15:.85;drawChart();},{passive:false});$('chart').onpointerdown=e=>{drag={x:e.clientX,end:view.end};$('chart').setPointerCapture(e.pointerId);};$('chart').onpointermove=e=>{if(drag){view.end=drag.end-(e.clientX-drag.x)/$('chart').clientWidth*view.count;drawChart();return;}const rect=$('chart').getBoundingClientRect(),i=Math.floor((e.clientX-rect.left-16)/(rect.width-94)*view.count)+view.end-view.count,b=display[i];if(!b)return;$('crosshair').hidden=false;$('crosshair').textContent=`${dt(b.time)}  O ${priceMoney(b.open)} H ${priceMoney(b.high)} L ${priceMoney(b.low)} C ${priceMoney(b.close)}`;};$('chart').onpointerup=$('chart').onpointercancel=()=>drag=null;$('chart').onpointerleave=()=>{$('crosshair').hidden=true;};$('resetView').onclick=()=>{view={count:display.length,end:display.length};drawChart();};
 document.querySelectorAll('[data-tf]').forEach(b=>b.onclick=()=>{tf=Number(b.dataset.tf);document.querySelectorAll('[data-tf]').forEach(x=>x.classList.toggle('active',x===b));view={count:150,end:Math.ceil(bars.length/tf)};aggregate();drawChart();});document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-tab]').forEach(x=>{x.classList.toggle('active',x===b);x.setAttribute('aria-selected',String(x===b));});document.querySelectorAll('.tab-panel').forEach(x=>x.hidden=x.id!==b.dataset.tab);drawEquity();});document.querySelectorAll('[data-curve]').forEach(b=>b.onclick=()=>{curve=b.dataset.curve;document.querySelectorAll('[data-curve]').forEach(x=>x.classList.toggle('active',x===b));drawEquity();});
 const ro=new ResizeObserver(()=>{drawChart();drawEquity();});ro.observe($('chart').parentElement);ro.observe($('overview'));
-function updateData(){resetOptimizer();const last=bars.at(-1),prev=bars.at(-2),change=(last.close/prev.close-1)*100;$('symbol').textContent=dataName;$('source').textContent=(marketMeta?marketMeta.provider+' · '+INTERVALS[marketMeta.interval].label:isSample?'Synthetic sample':'Imported OHLCV')+' · '+bars.length.toLocaleString()+' candles';$('dataBadge').textContent=marketMeta?'FETCHED DATA':isSample?'SAMPLE DATA':'IMPORTED DATA';$('lastPrice').textContent=priceMoney(last.close);$('priceChange').textContent=(change>=0?'+':'')+money(change)+'%';$('priceChange').className=change>=0?'positive':'negative';view={count:150,end:Math.ceil(bars.length/tf)};$('capitalLabel').textContent='Initial capital, '+quoteCurrency();$('assetIcon').textContent=marketMeta?.market==='forex'?'FX':marketMeta?.market==='commodities'?'CM':'₿';$('priceChange').title='Change from the previous completed candle';refreshFreshness();run();}
+function updateData(){resetOptimizer();const last=bars.at(-1),prev=bars.at(-2),change=(last.close/prev.close-1)*100;$('symbol').textContent=dataName;$('source').textContent=(marketMeta?marketMeta.provider+' · '+INTERVALS[marketMeta.interval].label:isSample?'Synthetic sample':'Imported OHLCV')+' · '+bars.length.toLocaleString()+' candles';$('dataBadge').textContent=marketMeta?'FETCHED DATA':isSample?'SAMPLE DATA':'IMPORTED DATA';$('lastPrice').textContent=priceMoney(last.close);$('priceChange').textContent=(change>=0?'+':'')+money(change)+'%';$('priceChange').className=change>=0?'positive':'negative';view={count:150,end:Math.ceil(bars.length/tf)};$('capitalLabel').textContent='Initial capital, '+quoteCurrency();$('assetIcon').textContent=marketMeta?.market==='forex'?'FX':marketMeta?.market==='commodities'?'CM':({'BTC/USDT':'₿','XRP/USDT':'XRP','SOL/USDT':'SOL','ETH/USDT':'Ξ'}[marketMeta?.symbol]||'₿');$('priceChange').title='Change from the previous completed candle';refreshFreshness();run();syncQuickAssets();$('exportMarket').disabled=isSample;}
 function download(name,text,type='text/csv'){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('export').onclick=()=>download('striangle-trades.csv','entry_time,exit_time,entry_price,exit_price,quantity,pnl,return_pct,reason\n'+result.trades.map(t=>[dt(t.entryTime)+'Z',dt(t.exitTime)+'Z',t.entry,t.exit,t.qty,t.pnl,t.return,t.reason].join(',')).join('\n'));
 $('downloadSample').onclick=()=>download('striangle-synthetic-sample.csv','time,open,high,low,close,volume\n'+demoData().map(b=>[new Date(b.time*1000).toISOString(),b.open,b.high,b.low,b.close,b.volume].join(',')).join('\n'));
@@ -50,6 +50,9 @@ function populateMarket(){
   $('marketSymbols').replaceChildren(...MARKETS[market].map(([symbol,label])=>{const o=document.createElement('option');o.value=symbol;o.label=label;return o;}));
   $('marketSymbol').value=MARKETS[market][0][0];
   $('apiKeySettings').hidden=market==='crypto';
+  $('quickAssets').hidden=market!=='crypto';
+  for(const option of $('marketCount').options) option.disabled=market!=='crypto'&&Number(option.value)>5000;
+  if(market!=='crypto'&&Number($('marketCount').value)>5000) $('marketCount').value='5000';
   marketStatus(market==='crypto'?'Binance public spot candles · no API key needed.':'Twelve Data · your API key is required. Availability and delay depend on your plan.');
 }
 function busyMarket(busy){$('fetchMarket').disabled=busy;$('fetchMarket').textContent=busy?'Fetching…':'↓ Fetch candles';$('cancelFetch').hidden=!busy;}
@@ -63,7 +66,7 @@ async function loadMarket(){
   const settings={market:$('market').value,symbol:$('marketSymbol').value,interval:$('marketInterval').value,count:Number($('marketCount').value),apiKey:$('marketApiKey').value,signal:controller.signal};
   busyMarket(true);marketStatus('Fetching completed candles… Your current chart stays available.');
   try{
-    const next=await fetchMarket(settings);
+    const next=await fetchMarket({...settings,onProgress:progress=>{if(sequence===marketSequence)marketStatus(`${settings.symbol} · ${progress.received.toLocaleString()} / ${progress.requested.toLocaleString()} completed candles · ${progress.pages} pages`);}});
     if(sequence!==marketSequence)return;
     backtest(next.bars,config());
     bars=next.bars;dataName=next.dataName;isSample=false;marketMeta=next.marketMeta;updateData();
@@ -73,6 +76,10 @@ async function loadMarket(){
   finally{if(sequence===marketSequence){marketRequest=null;busyMarket(false);}}
 }
 $('marketForm').onsubmit=e=>{e.preventDefault();loadMarket();};
+function syncQuickAssets(){for(const button of document.querySelectorAll('[data-asset]'))button.setAttribute('aria-pressed',String(marketMeta?.market==='crypto'&&marketMeta.symbol===button.dataset.asset));}
+for(const button of document.querySelectorAll('[data-asset]'))button.onclick=()=>{cancelMarket();$('market').value='crypto';populateMarket();$('marketSymbol').value=button.dataset.asset;loadMarket();};
+$('exportMarket').onclick=()=>download(`striangle-${dataName.replace(/[^A-Za-z0-9]/g,'-')}-${marketMeta?.interval||'candles'}.csv`,'time,open,high,low,close,volume\n'+bars.map(b=>[new Date(b.time*1000).toISOString(),b.open,b.high,b.low,b.close,b.volume].join(',')).join('\n'));
+
 window.addEventListener('online',refreshFreshness);window.addEventListener('offline',refreshFreshness);
 const optimizerFields=[['fast','Fast SMA','10,20,30'],['slow','Slow SMA','40,60,80'],['rsiPeriod','RSI period','7,14,21'],['oversold','RSI entry','25,30'],['overbought','RSI exit','65,70'],['stop','Stop loss, %','2,3,5'],['take','Take profit, %','4,6,10'],['entryValue','Custom entry number',''],['exitValue','Custom exit number','']];
 for(const [key,title,value] of optimizerFields){const label=document.createElement('label');label.textContent=title;const input=document.createElement('input');input.id='range_'+key;input.value=value;input.placeholder='Current value';input.autocomplete='off';label.append(input);$('optimizerRanges').append(label);}
@@ -127,3 +134,6 @@ $('optimizerExport').onclick=()=>{
 };
 populateMarket();
 updateData();try{db=await openDB();const saved=await new Promise((resolve,reject)=>{const r=db.transaction('state').objectStore('state').get('dataset');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});if(saved?.bars?.length>1 && marketSequence===0){bars=saved.bars;dataName=saved.dataName;isSample=saved.isSample;marketMeta=saved.marketMeta||null;if(marketMeta){$('market').value=marketMeta.market;populateMarket();$('marketSymbol').value=marketMeta.symbol;$('marketInterval').value=marketMeta.interval;$('marketCount').value=String(marketMeta.requestedCount);marketStatus('Loaded saved candles. Fetch again for current data.');}updateData();}}catch{status('Browser storage unavailable. You can still run tests in this session.');}
+
+const requestedAsset=new URLSearchParams(location.search).get('symbol');
+if(['BTCUSDT','XRPUSDT','SOLUSDT','ETHUSDT'].includes(requestedAsset)){ $('market').value='crypto';populateMarket();$('marketSymbol').value=requestedAsset.replace('USDT','/USDT');loadMarket(); }

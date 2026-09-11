@@ -69,6 +69,25 @@ class APITests(TestCase):
         self.assertEqual(self.post("/api/jobs/", {"kind": "history", "symbol": "BTCUSDT", "count": 1000}).status_code, 202)
         self.assertEqual(Job.objects.count(), 1)
 
+    def test_all_four_assets_can_be_viewed_and_used_for_paper(self):
+        symbols = ["BTCUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT"]
+        self.assertEqual([m["symbol"] for m in self.client.get("/api/dashboard/").json()["markets"]], symbols)
+        for symbol in symbols:
+            response = self.post("/api/runs/", {"symbol": symbol})
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual(response.json()["symbol"], symbol)
+
+    def test_large_training_imports_are_queued_for_all_assets_with_a_fixed_cutoff(self):
+        symbols = ["BTCUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT"]
+        response = self.post("/api/jobs/", {"kind": "history", "symbols": symbols, "count": 525600, "end": 1700000000})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(len(response.json()["ids"]), 4)
+        for job in Job.objects.all():
+            self.assertEqual(job.params["count"], 525600)
+            self.assertEqual(job.params["end_ms"], 1699999999999)
+        for count in (True, 1000001, -1):
+            self.assertEqual(self.post("/api/jobs/", {"kind": "history", "symbol": "SOLUSDT", "count": count}).status_code, 400)
+
     def test_stop_flat_paper_run_is_persisted(self):
         run = create_paper(self.user, "BTCUSDT", {})
         self.assertEqual(self.post(f"/api/runs/{run.id}/control/", {"action": "stop"}).status_code, 200)

@@ -25,8 +25,9 @@
     </section>
     <div id="workspace" hidden>
       <section class="bot-heading"><div><span class="eyebrow">TRADING OPERATIONS</span><h1>From signal to evidence.</h1><p>Every observation recorded. Every decision explained.</p></div>
-        <div class="heading-controls"><span id="executionBadge" class="mode-badge">Paper trading</span><label>Market<select id="botSymbol"><option value="BTCUSDT">BTC / USDT</option><option value="ETHUSDT">ETH / USDT</option></select></label></div>
+        <div class="heading-controls"><span id="executionBadge" class="mode-badge">Paper trading</span><label>Market<select id="botSymbol"><option value="BTCUSDT">BTC / USDT</option><option value="XRPUSDT">XRP / USDT</option><option value="SOLUSDT">SOL / USDT</option><option value="ETHUSDT">ETH / USDT</option></select></label></div>
       </section>
+      <div id="assetOverview" class="asset-overview" aria-label="Your four assets"></div>
       <nav class="stage-nav" aria-label="Development stages">
         <button class="selected" data-section="dataPanel"><span>01</span> Record markets</button>
         <button data-section="researchPanel"><span>02</span> Test strategies</button>
@@ -54,11 +55,17 @@
       </section>
       <section id="researchPanel" class="operation-section" hidden>
         <div class="research-layout"><article class="panel"><span class="eyebrow">HISTORICAL RESEARCH</span><h2>Test the hypothesis.</h2>
-          <form id="historyForm" class="history-form"><label>Import real 1-minute candles<select id="historyCount"><option value="1000">1,000 candles</option><option value="5000">5,000 candles</option></select></label><button type="submit">Fetch history</button></form>
+          <form id="historyForm" class="history-form">
+            <label>1-minute candles per asset<select id="historyCount"><option value="5000">5,000 · 3.5 days</option><option value="10000">10,000 · 7 days</option><option value="50000">50,000 · 35 days</option><option value="100000" selected>100,000 · 69 days</option><option value="250000">250,000 · 174 days</option><option value="525600">525,600 · 1 year</option><option value="1000000">1,000,000 · 694 days</option></select></label>
+            <label>Before, UTC (optional)<input id="historyEnd" type="datetime-local"></label>
+            <div class="history-actions"><button type="submit">Fetch selected asset</button><button type="submit" name="scope" value="all">Fetch all four</button></div>
+          </form>
+          <p class="muted small">History is saved in the database. Imports resume after worker restarts; duplicate candles are kept once. Leave the date blank for the latest completed candles. Durations are approximate.</p>
+          <div class="dataset-summary"><span id="datasetCoverage">No historical candles yet.</span><a id="exportCandles" class="button-link" href="/api/candles.csv?symbol=BTCUSDT">Export training CSV</a><a id="viewAssetChart" class="button-link" href="/?symbol=BTCUSDT">View chart</a></div>
           <form id="researchForm"><div class="fields"><label>Data source<select id="researchMode"><option value="candles">Historical candles</option><option value="replay">Recorded event replay</option></select></label><label>Select parameters for<select id="selectionStrategy"><option value="trend">Trend baseline</option><option value="rsi">RSI baseline</option><option value="ai_trend">AI-assisted trend</option></select></label></div>
             <div class="fields date-fields"><label>Start, UTC<input id="researchStart" type="datetime-local" required></label><label>End, UTC<input id="researchEnd" type="datetime-local" required></label></div>
             <div class="fields"><label>Fast SMA candidates<input id="fastGrid" value="5,10" required></label><label>Slow SMA candidates<input id="slowGrid" value="20,30" required></label></div>
-            <p class="muted small" id="researchMethod">First 70% selects parameters. The selected configuration is evaluated once on the final 30%, with a fresh portfolio.</p>
+            <p class="muted small" id="researchMethod">First 70% selects parameters. The selected configuration is evaluated once on the final 30%, with a fresh portfolio. Choose up to 100,000 candles per research run; CSV export includes the full stored history. Candle data alone does not train the news AI or reconstruct historical order books.</p>
             <button class="primary" type="submit">Run chronological research</button>
           </form>
           <div id="jobList" class="job-list" aria-live="polite"></div>

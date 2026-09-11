@@ -63,12 +63,26 @@ try {
   assert.equal(await page.locator('#sourceStatuses .source-status').count(), 7);
   assert.equal(await page.locator('#marketPrice').textContent(), '—');
   assert.match(await page.locator('#aiTitle').textContent(), /not configured/);
+  assert.equal(await page.locator('#assetOverview button').count(),4);
+  for(const symbol of ['BTCUSDT','XRPUSDT','SOLUSDT','ETHUSDT']) {
+    await page.locator('#botSymbol').selectOption(symbol);
+    assert.equal(await page.locator('#bookSymbol').textContent(),symbol.replace('USDT',' / USDT'));
+    assert.equal(await page.locator('#exportCandles').getAttribute('href'),`/api/candles.csv?symbol=${symbol}`);
+  }
+  await page.locator('#botSymbol').selectOption('BTCUSDT');
   await assertFits();
   await screenshot('dashboard-desktop');
 
   await page.locator('[data-section="researchPanel"]').click();
   assert.equal(await page.locator('#cfg_capital').inputValue(), '10000');
   assert.equal(await page.locator('#researchPanel').isVisible(), true);
+  assert.equal(await page.locator('#historyCount').inputValue(),'100000');
+  await page.getByRole('button',{name:'Fetch all four',exact:true}).click();
+  await page.locator('#jobList progress').nth(3).waitFor();
+  const datasetJobs=(await (await page.request.get(`${baseURL}/api/dashboard/`)).json()).jobs;
+  assert.equal(datasetJobs.length,4);
+  assert.deepEqual(new Set(datasetJobs.map(job=>job.params.symbol)),new Set(['BTCUSDT','XRPUSDT','SOLUSDT','ETHUSDT']));
+  assert(datasetJobs.every(job=>job.params.count===100000&&job.status==='queued'));
   await page.locator('[data-section="paperPanel"]').click();
   const created = page.waitForResponse(response => response.url() === `${baseURL}/api/runs/` && response.request().method() === 'POST');
   await page.locator('#startPaper').click();
@@ -107,6 +121,30 @@ try {
   await page.locator('#logout').click();
   await page.locator('#authPanel').waitFor({state: 'visible'});
   assert.equal((await page.request.get(`${baseURL}/api/dashboard/`)).status(), 401);
+  await page.setViewportSize({width:1440,height:1000});
+  const fixtureBars=Array.from({length:10001},(_,i)=>[1700000040000+i*3600000,'10','12','9','11','5',1700000040000+(i+1)*3600000-1]);
+  await page.route('https://data-api.binance.vision/api/v3/**',async route=>{
+    const url=new URL(route.request().url());
+    const data=url.pathname.endsWith('/time')?{serverTime:fixtureBars.at(-1)[6]+1}:fixtureBars.filter(row=>row[0]<=Number(url.searchParams.get('endTime'))).slice(-Number(url.searchParams.get('limit')));
+    await route.fulfill({json:data});
+  });
+  await page.goto(`${baseURL}/`);
+  await page.locator('#quickAssets').waitFor();
+  await page.locator('#marketCount').selectOption('10000');
+  await page.locator('[data-asset="XRP/USDT"]').click();
+  await page.getByText('Binance · Loaded 10,000 completed candles for XRP/USDT.',{exact:true}).waitFor();
+  assert.equal(await page.locator('#assetIcon').textContent(),'XRP');
+  assert.equal(await page.locator('#exportMarket').isEnabled(),true);
+  await screenshot('four-assets-chart-desktop');
+  await page.locator('#marketCount').selectOption('500');
+  for(const asset of ['BTC','SOL','ETH']){
+    await page.locator(`[data-asset="${asset}/USDT"]`).click();
+    await page.getByText(`Binance · Loaded 500 completed candles for ${asset}/USDT.`,{exact:true}).waitFor();
+    assert.equal(await page.locator('#symbol').textContent(),`${asset}/USDT`);
+  }
+  await page.setViewportSize({width:390,height:844});
+  await assertFits();
+  await screenshot('four-assets-chart-mobile');
   assert.deepEqual(errors, [], 'Browser runtime errors');
   console.log('Browser checks passed: authentication, dashboard, experiment settings, paper controls, readiness, mobile layout and logout.');
 } catch (error) {

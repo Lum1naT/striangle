@@ -36,3 +36,30 @@ test('rate and auth errors are actionable and never include raw provider secrets
  await assert.rejects(fetchMarket({market:'forex',symbol:'EUR/USD',count:100,apiKey:'secret'},async()=>response({status:'error',code:429,message:'secret'})),/rate limit/);
  await assert.rejects(fetchMarket({market:'forex',symbol:'EUR/USD',count:100,apiKey:'secret'},async()=>response({status:'error',code:401,message:'secret'})),e=>e.message.includes('access denied')&&!e.message.includes('secret'));
 });
+
+test('100,000 crypto candles paginate completely, report progress and fit CSV validation',async()=>{
+ const rows=Array.from({length:100001},(_,i)=>kline(i)), progress=[];
+ const result=await fetchMarket({market:'crypto',symbol:'SOL/USDT',count:100000,onProgress:value=>progress.push(value)},async(url)=>{
+   if(url.pathname.endsWith('/time'))return response({serverTime:rows.at(-1)[6]+1});
+   assert.equal(url.searchParams.get('symbol'),'SOLUSDT');
+   const end=Number(url.searchParams.get('endTime')),limit=Number(url.searchParams.get('limit'));
+   assert(limit<=1000);
+   return response(rows.filter(row=>row[0]<=end).slice(-limit));
+ });
+ assert.equal(result.bars.length,100000);
+ assert.equal(result.bars[0].time,rows[1][0]/1000);
+ assert.equal(new Set(result.bars.map(bar=>bar.time)).size,100000);
+ assert.equal(progress.at(-1).received,100000);
+ assert(progress.length>6);
+ assert(progress.every((value,i)=>!i||value.received>progress[i-1].received));
+});
+
+test('large imports cancel between pages and forex retains its provider limit',async()=>{
+ const controller=new AbortController();let calls=0;
+ await assert.rejects(fetchMarket({market:'crypto',symbol:'XRP/USDT',count:10000,signal:controller.signal,onProgress:()=>controller.abort()},async(url)=>{
+   if(url.pathname.endsWith('/time'))return response({serverTime:2e12});
+   calls++;return response(Array.from({length:1000},(_,i)=>kline(i)));
+ }),/cancelled/);
+ assert.equal(calls,1);
+ await assert.rejects(fetchMarket({market:'forex',symbol:'EUR/USD',count:10000,apiKey:'fixture'}),/5,000/);
+});

@@ -2,12 +2,10 @@ import signal
 import threading
 
 from django.core.management.base import BaseCommand
-from django.utils import timezone
 
 from trading.locking import single_worker
-from trading.models import Job
 from trading.recording import heartbeat
-from trading.research import work_one_job
+from trading.research import recover_jobs, work_one_job
 
 
 class Command(BaseCommand):
@@ -21,12 +19,12 @@ class Command(BaseCommand):
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
         with single_worker("research", stop) as check:
-            Job.objects.filter(status="running").update(status="failed", error="Research worker restarted before completion; submit a new job", finished_at=timezone.now())
+            recover_jobs()
             try:
                 while not stop.is_set():
                     check()
                     heartbeat("research", "running", "Ready for historical research jobs")
-                    worked = work_one_job()
+                    worked = work_one_job(stop)
                     if options["once"]:
                         break
                     if not worked:

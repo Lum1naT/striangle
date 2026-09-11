@@ -9,7 +9,7 @@ export const INTERVALS = {
   '1d': {label: '1 day', twelve: '1day'},
 };
 export const MARKETS = {
-  crypto: [['BTC/USDT','Bitcoin'],['ETH/USDT','Ethereum'],['SOL/USDT','Solana'],['BNB/USDT','BNB'],['XRP/USDT','XRP'],['DOGE/USDT','Dogecoin']],
+  crypto: [['BTC/USDT','Bitcoin'],['XRP/USDT','XRP'],['SOL/USDT','Solana'],['ETH/USDT','Ethereum']],
   forex: [['EUR/USD','Euro / US dollar'],['GBP/USD','Pound / US dollar'],['USD/JPY','US dollar / Yen'],['AUD/USD','Australian dollar / US dollar'],['USD/CHF','US dollar / Swiss franc'],['EUR/CZK','Euro / Czech koruna'],['USD/CZK','US dollar / Czech koruna']],
   commodities: [['XAU/USD','Gold spot'],['XAG/USD','Silver spot'],['XPT/USD','Platinum spot'],['XPD/USD','Palladium spot'],['WTI/USD','WTI crude oil spot'],['XBR/USD','Brent crude oil spot']],
 };
@@ -58,17 +58,18 @@ async function requestJSON(url, signal, fetcher) {
   }
   return data;
 }
-export async function fetchMarket({market,symbol,interval='1h',count=1000,apiKey='',signal}, fetcher=fetch) {
+export async function fetchMarket({market,symbol,interval='1h',count=1000,apiKey='',signal,onProgress}, fetcher=fetch) {
   if (!MARKETS[market] || !INTERVALS[interval]) throw Error('Choose a supported market and timeframe.');
   symbol = symbol.trim().toUpperCase();
   if (!/^[A-Z0-9]{1,15}\/[A-Z0-9]{2,10}$/.test(symbol)) throw Error('Use a pair such as BTC/USDT, EUR/USD or XAU/USD.');
-  if (!Number.isInteger(count) || count<100 || count>5000) throw Error('Choose between 100 and 5,000 candles.');
+  const maximum = market === 'crypto' ? 100000 : 5000;
+  if (!Number.isInteger(count) || count<100 || count>maximum) throw Error(`Choose between 100 and ${maximum.toLocaleString('en-US')} candles for this market.`);
   if (market !== 'crypto' && !apiKey.trim()) throw Error('Enter your Twelve Data API key to fetch forex or commodities.');
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   signal?.addEventListener('abort',abort,{once:true});
-  const timer = setTimeout(abort,45000);
+  const timer = setTimeout(abort,Math.max(45000,Math.ceil(count/1000)*5000));
   const get = url => requestJSON(url,controller.signal,fetcher);
   try {
     let bars,provider;
@@ -76,19 +77,32 @@ export async function fetchMarket({market,symbol,interval='1h',count=1000,apiKey
       provider='Binance';
       const time = await get(new URL('time',BINANCE));
       if (!Number.isFinite(time.serverTime)) throw Error('Binance server time is unavailable.');
-      let rows=[],endTime;
-      for(let page=0;page<6 && rows.length<count+1;page++) {
+      const rows = new Map();
+      let endTime=time.serverTime, completed=0, page=0;
+      while(completed<count) {
         const url=new URL('klines',BINANCE);
-        url.search=new URLSearchParams({symbol:symbol.replace('/',''),interval,limit:String(Math.min(1000,count+1-rows.length)),...(endTime==null?{}:{endTime:String(endTime)})});
+        url.search=new URLSearchParams({symbol:symbol.replace('/',''),interval,limit:String(Math.min(1000,count+1-completed)),endTime:String(endTime)});
         const chunk=await get(url);
         if (!Array.isArray(chunk)) throw Error('Binance returned an unexpected response.');
         if (!chunk.length) break;
-        rows=chunk.concat(rows);
-        const first=Number(chunk[0][0]);
-        if (!Number.isFinite(first) || (endTime!=null && first>endTime)) throw Error('Invalid historical pagination from Binance.');
+        const first=chunk.reduce((value,row)=>Math.min(value,Number(row[0])),Infinity);
+        if (!Number.isFinite(first) || first>endTime) throw Error('Invalid historical pagination from Binance.');
+        for(const row of chunk) {
+          const at=Number(row[0]);
+          if(at>endTime) throw Error('Binance returned candles outside the requested window.');
+          if(!rows.has(at) && Number(row[6])<time.serverTime) completed++;
+          rows.set(at,row);
+        }
         endTime=first-1;
+        onProgress?.({received:Math.min(completed,count),requested:count,pages:++page});
+        if(completed<count) await new Promise((resolve,reject)=>{
+          const cancel=()=>{clearTimeout(wait);controller.signal.removeEventListener('abort',cancel);reject(Error('Request cancelled or timed out. Please try again.'));};
+          const wait=setTimeout(()=>{controller.signal.removeEventListener('abort',cancel);resolve();},100);
+          controller.signal.addEventListener('abort',cancel,{once:true});
+          if(controller.signal.aborted) cancel();
+        });
       }
-      bars=normalizeBinance(rows,time.serverTime).slice(-count);
+      bars=normalizeBinance([...rows.values()].filter(row=>Number(row[6])<time.serverTime).sort((a,b)=>Number(a[0])-Number(b[0])).slice(-count),time.serverTime);
     } else {
       provider='Twelve Data';
       const url=new URL('time_series',TWELVE);

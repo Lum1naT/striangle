@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 from defusedxml import ElementTree
 
 from .configuration import dec
+from .markets import ASSETS, MAX_HISTORY_CANDLES
 
 
 class ProviderError(Exception):
@@ -28,6 +29,12 @@ def http_json(url, *, payload=None, headers=None, method=None, timeout=15):
             if len(raw) > 8_000_000:
                 raise ProviderError("Provider response exceeds size limit")
             return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (418, 429):
+            retry = exc.headers.get("Retry-After", "")
+            delay = f" {retry} seconds" if retry.isdigit() else " before resuming"
+            raise ProviderError(f"Provider rate limit reached; wait{delay}") from None
+        raise ProviderError(f"Provider request failed (HTTP {exc.code})") from None
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         # Do not echo request headers, URLs containing signatures, or response bodies.
         raise ProviderError(f"Provider request failed ({type(exc).__name__})") from None
@@ -114,26 +121,42 @@ def normalize_bybit(message, cache, received_at=None):
     return []
 
 
-def fetch_candles(symbol, count=1000):
-    if symbol not in ("BTCUSDT", "ETHUSDT") or not 50 <= count <= 5000:
-        raise ValueError("Choose BTCUSDT or ETHUSDT and 50–5,000 candles")
+def candle_batches(symbol, count=1000, *, end_ms=None):
+    """Newest-to-oldest pages, each sorted oldest first; never invent gap bars."""
+    if symbol not in ASSETS or type(count) is not int or not 1 <= count <= MAX_HISTORY_CANDLES:
+        raise ValueError("Choose BTCUSDT, XRPUSDT, SOLUSDT or ETHUSDT and at most 1,000,000 candles")
     host = "https://data-api.binance.vision/api/v3/"
     server_time = int(http_json(host+"time")["serverTime"])
-    end, result = server_time, {}
-    while len(result) < count:
-        url = host+"klines?"+urllib.parse.urlencode({"symbol": symbol, "interval": "1m", "limit": min(1000, count-len(result)+1), "endTime": end})
+    # end_ms is inclusive, including when resuming immediately before a saved page.
+    end = min(server_time//60000*60000-1, int(end_ms) if end_ms is not None else server_time)
+    remaining = count
+    while remaining > 0 and end >= 0:
+        url = host+"klines?"+urllib.parse.urlencode({"symbol": symbol, "interval": "1m", "limit": min(1000, remaining), "endTime": end})
         rows = http_json(url)
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list):
+            raise ProviderError("Unexpected historical candle response")
+        if not rows:
             break
+        page = {}
         for row in rows:
-            if int(row[6]) < server_time:
-                body = candle_payload(row)
-                result[body["opened_at"]] = body
-        next_end = int(rows[0][0])-1
-        if next_end >= end:
+            body = candle_payload(row)
+            if int(row[0]) > end:
+                raise ProviderError("Provider returned candles outside the requested window")
+            if int(row[6]) <= end and int(row[6]) < server_time:
+                page[body["opened_at"]] = body
+        next_end = min(int(row[0]) for row in rows)-1
+        if next_end >= end or not page:
             raise ProviderError("Candle pagination did not advance")
+        bars = sorted(page.values(), key=lambda x: x["opened_at"])[-remaining:]
+        yield bars, next_end
+        remaining -= len(bars)
         end = next_end
-    return sorted(result.values(), key=lambda x: x["opened_at"])[-count:]
+        if remaining:
+            time.sleep(0.15)
+
+
+def fetch_candles(symbol, count=1000):
+    return sorted((bar for batch, _ in candle_batches(symbol, count) for bar in batch), key=lambda x: x["opened_at"])
 
 
 class PlainText(HTMLParser):

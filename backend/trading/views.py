@@ -2,6 +2,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 from functools import wraps
 
 from django.conf import settings
@@ -16,6 +17,7 @@ from django.views.decorators.http import require_GET, require_POST
 from .configuration import DEFAULTS, fingerprint, validate_config
 from .engine import metrics
 from .models import Candle, Event, Heartbeat, Job, LoginThrottle, Run
+from .markets import ASSETS, MAX_HISTORY_CANDLES, MAX_QUEUED_JOBS, MAX_RESEARCH_CANDLES
 from .research import candidate_configs
 from .services import create_paper, readiness
 
@@ -39,14 +41,16 @@ def api(view):
             return view(request, *args, **kwargs)
         except Run.DoesNotExist:
             return JsonResponse({"error": "Run not found"}, status=404)
+        except Job.DoesNotExist:
+            return JsonResponse({"error": "Research job not found"}, status=404)
         except (ValueError, KeyError, TypeError, ValidationError) as exc:
             return JsonResponse({"error": str(exc)[:300] if isinstance(exc, ValueError) else "Invalid request fields"}, status=400)
     return wrapped
 
 
 def symbol_value(value):
-    if value not in settings.SYMBOLS or value not in ("BTCUSDT", "ETHUSDT"):
-        raise ValueError("Choose a configured BTCUSDT or ETHUSDT market")
+    if value not in settings.SYMBOLS or value not in ASSETS:
+        raise ValueError("Choose a configured BTCUSDT, XRPUSDT, SOLUSDT or ETHUSDT market")
     return value
 
 
@@ -133,7 +137,8 @@ def dashboard(request):
     news = [{"id": e.id, "at": e.received_at, **e.payload} for e in Event.objects.filter(kind="news").order_by("-id")[:10]]
     return JsonResponse({"now": now, "sources": sources, "markets": markets, "news": news,
         "runs": [run_summary(r) for r in Run.objects.filter(owner=request.user).order_by("-created_at")[:50]],
-        "jobs": list(Job.objects.filter(owner=request.user).order_by("-created_at").values("id", "kind", "status", "error", "result", "created_at")[:10]),
+        "jobs": list(Job.objects.filter(owner=request.user).order_by("-created_at").values("id", "kind", "status", "error", "result", "params", "created_at")[:12]),
+        "limits": {"history_candles": MAX_HISTORY_CANDLES, "research_candles": MAX_RESEARCH_CANDLES},
         "defaults": DEFAULTS, "ai_configured": bool(settings.OPENAI_API_KEY and settings.OPENAI_MODEL),
         "model": settings.OPENAI_MODEL or None, "live_server_enabled": settings.LIVE_TRADING_ENABLED,
         "execution_environment": "Binance Spot Testnet" if settings.BINANCE_TESTNET else "Binance Spot production"})
@@ -143,16 +148,29 @@ def dashboard(request):
 @api
 def jobs(request):
     data = body(request)
-    symbol = symbol_value(data.get("symbol"))
-    if Job.objects.filter(owner=request.user, status__in=["queued", "running"]).count() >= 3:
-        raise ValueError("Wait for your current research jobs to finish")
     kind = data.get("kind")
     if kind == "history":
-        count = data.get("count", 1000)
-        if type(count) is not int or not 50 <= count <= 5000:
-            raise ValueError("History must contain 50–5,000 candles")
-        params = {"symbol": symbol, "count": count}
-    elif kind == "backtest":
+        symbols = data.get("symbols", [data.get("symbol")])
+        if not isinstance(symbols, list) or not 1 <= len(symbols) <= 4 or ("symbols" in data and "symbol" in data):
+            raise ValueError("Choose one asset or a list of up to four assets")
+        symbols = list(dict.fromkeys(symbol_value(s) for s in symbols))
+        count = data.get("count", 100000)
+        if type(count) is not int or not 50 <= count <= MAX_HISTORY_CANDLES:
+            raise ValueError("History must contain 50–1,000,000 candles per asset")
+        end = data.get("end", timezone.now().timestamp())
+        if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or not 0 < end <= timezone.now().timestamp():
+            raise ValueError("Choose a past history end time in UTC")
+        if Job.objects.filter(owner=request.user, status__in=["queued", "running"]).count()+len(symbols) > MAX_QUEUED_JOBS:
+            raise ValueError("Wait for your current research jobs to finish; at most eight can be queued")
+        with transaction.atomic():
+            created = [Job.objects.create(owner=request.user, kind=kind,
+                params={"symbol": symbol, "count": count, "end_ms": int(end*1000)-1},
+                result={"symbol": symbol, "requested": count, "candles": 0}) for symbol in symbols]
+        return JsonResponse({"id": str(created[0].id), "ids": [str(j.id) for j in created], "status": "queued"}, status=202)
+    symbol = symbol_value(data.get("symbol"))
+    if Job.objects.filter(owner=request.user, status__in=["queued", "running"]).count() >= MAX_QUEUED_JOBS:
+        raise ValueError("Wait for your current research jobs to finish")
+    if kind == "backtest":
         mode = data.get("mode")
         if mode not in ("candles", "replay"):
             raise ValueError("Choose candle research or recorded event replay")
@@ -170,6 +188,20 @@ def jobs(request):
     else:
         raise ValueError("Unknown research job")
     job = Job.objects.create(owner=request.user, kind=kind, params=params)
+    return JsonResponse({"id": str(job.id), "status": job.status}, status=202)
+
+
+@require_POST
+@api
+def resume_history(request, job_id):
+    with transaction.atomic():
+        job = Job.objects.select_for_update().get(pk=job_id, owner=request.user, kind="history")
+        if job.status != "failed":
+            raise ValueError("Only a failed history import needs manual resuming")
+        if Job.objects.filter(owner=request.user, status__in=["queued", "running"]).count() >= MAX_QUEUED_JOBS:
+            raise ValueError("Wait for your current research jobs to finish")
+        job.status, job.error, job.finished_at = "queued", "", None
+        job.save(update_fields=["status", "error", "finished_at"])
     return JsonResponse({"id": str(job.id), "status": job.status}, status=202)
 
 
@@ -258,4 +290,26 @@ def export_events(request):
                 "event_at": row.event_at.isoformat(), "received_at": row.received_at.isoformat(), "available_at": row.available_at.isoformat(), "payload": row.payload})+"\n"
     response = StreamingHttpResponse(lines(), content_type="application/x-ndjson")
     response["Content-Disposition"] = f'attachment; filename="striangle-{symbol}-events.jsonl"'
+    return response
+
+
+@require_GET
+@api
+def export_candles(request):
+    symbol = symbol_value(request.GET.get("symbol", "BTCUSDT"))
+    rows = Candle.objects.filter(symbol=symbol, interval="1m", fetched_at__lte=timezone.now()).order_by("opened_at")
+
+    def lines():
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["time", "open", "high", "low", "close", "volume", "closed_at", "fetched_at", "source", "symbol", "interval"])
+        yield buffer.getvalue()
+        for row in rows.iterator(chunk_size=1000):
+            buffer.seek(0)
+            buffer.truncate(0)
+            writer.writerow([row.opened_at.isoformat(), *(row.payload[k] for k in ("open", "high", "low", "close", "volume")),
+                             row.closed_at.isoformat(), row.fetched_at.isoformat(), "binance_spot", symbol, "1m"])
+            yield buffer.getvalue()
+    response = StreamingHttpResponse(lines(), content_type="text/csv")
+    response["Content-Disposition"] = f'attachment; filename="striangle-{symbol}-1m-training.csv"'
     return response
